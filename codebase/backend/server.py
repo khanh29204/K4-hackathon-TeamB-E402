@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 import discord_connection
@@ -69,6 +69,75 @@ def error_response(status_code: int, code: str, message: str) -> HTTPException:
 class ChatRequest(BaseModel):
     user_query: str
     conversation_id: str | None = None
+
+
+@app.post("/api/v1/chat/stream")
+def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """SSE streaming endpoint for /api/v1/chat. Streams response text tokens/chunks
+    to the frontend in real-time for an enhanced UI experience."""
+    import json
+    import time
+
+    try:
+        google_status = google_connection.get_status()
+    except Exception:
+        google_status = {"connected": False}
+
+    if not google_status.get("connected"):
+        raise error_response(
+            401,
+            "UNAUTHORIZED",
+            "Bạn chưa đăng nhập Google. Vui lòng bấm 'Đăng nhập với Google' ở góc trên bên phải để bắt đầu sử dụng trợ lý StudyPulse AI.",
+        )
+
+    conversation_id = request.conversation_id or uuid.uuid4().hex
+    config = {"configurable": {"thread_id": conversation_id}}
+
+    def sse_event_generator():
+        yield f"data: {json.dumps({'type': 'status', 'message': 'Đang tìm kiếm và xử lý...'}, ensure_ascii=False)}\n\n"
+
+        try:
+            final_state = get_compiled_graph().invoke(
+                {"flow_type": "chat", "user_query": request.user_query, "raw_payload": {}},
+                config=config,
+            )
+        except Exception as exc:
+            err_data = {"type": "error", "message": f"{type(exc).__name__}: {exc}"}
+            yield f"data: {json.dumps(err_data, ensure_ascii=False)}\n\n"
+            return
+
+        assistant_text = final_state.get("final_response", "")
+        chat_resp = final_state.get("chat_response") or {}
+        blocked = bool(final_state.get("guardrail_blocked"))
+
+        # Stream text in small chunks for live typing effect
+        chunk_size = 4
+        words = assistant_text.split(" ")
+        for i in range(0, len(words), chunk_size):
+            chunk = " ".join(words[i : i + chunk_size])
+            if i + chunk_size < len(words):
+                chunk += " "
+            event_data = {"type": "delta", "text": chunk}
+            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+            time.sleep(0.02)
+
+        data = {
+            "query_id": uuid.uuid4().hex,
+            "conversation_id": conversation_id,
+            "timestamp": now_iso(),
+            "response_text": assistant_text,
+            "sources_cited": chat_resp.get("sources_cited", []),
+            "calendar_events": [],
+            "timeline_items_referenced": chat_resp.get("timeline_items_referenced", []),
+            "requires_clarification": bool(chat_resp.get("requires_clarification", False)),
+            "suggested_actions": chat_resp.get("suggested_actions", []),
+            "status": "blocked" if blocked else "answered",
+            "artifact_version": _ARTIFACT_VERSION,
+        }
+        done_event = {"type": "done", "data": data}
+        yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
 
 
 class PatchTimelineRequest(BaseModel):

@@ -138,14 +138,17 @@ def fetch_gmail_messages(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def prefilter(messages: list[dict[str, Any]], *, unread_only: bool = True) -> list[dict[str, Any]]:
-    """Date window is already applied at fetch time (start_datetime/
-    newer_than); this is the read-state half of the prefilter — the single
-    biggest lever on LLM classification volume, since most inbox mail is
-    either old or already handled. Set unread_only=False to still index
-    (without necessarily re-classifying) mail the user asks about directly."""
-    if not unread_only:
-        return messages
-    return [m for m in messages if m.get("is_unread")]
+    """Filter messages: exclude generic marketing/promotional spam and apply read-state rules."""
+    promo_keywords = ["khuyến mãi", "ưu đãi", "promotion", "discount", "newsletter", "unsubscribed", "đăng ký ngay"]
+    filtered = []
+    for m in messages:
+        if unread_only and not m.get("is_unread"):
+            continue
+        subj = (m.get("subject") or "").lower()
+        if any(kw in subj for kw in promo_keywords):
+            continue
+        filtered.append(m)
+    return filtered
 
 
 # ═══════════════════════════════════════════════════════════════════════════

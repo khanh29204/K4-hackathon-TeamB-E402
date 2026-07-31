@@ -3,7 +3,7 @@ import useSWR from "swr";
 import useSWRMutation from "swr/mutation";
 import { initialMessages, initialPlatforms } from "./data.js";
 import { ApiError } from "./api/client.js";
-import { sendChatMessage } from "./api/chat.js";
+import { sendChatMessage, sendChatMessageStream } from "./api/chat.js";
 import { TIMELINE_KEY, confirmCalendar, flagTimelineItem, getTimeline, patchTimelineItem } from "./api/timeline.js";
 import {
   disconnectDiscord,
@@ -154,24 +154,67 @@ export default function App() {
     ]);
 
     try {
-      const data = await triggerChat({ conversationId, userQuery: text });
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === loadingMessageId
-            ? {
-                id: loadingMessageId,
-                role: "assistant",
-                text: data.response_text,
-                time: formatTime(),
-                needsClarification: data.requires_clarification,
-                calendarEvents: data.calendar_events,
-              }
-            : message,
-        ),
-      );
-      if (data.timeline_items_referenced?.length) {
-        mutateTimeline();
-      }
+      await sendChatMessageStream({
+        conversationId,
+        userQuery: text,
+        onDelta: (chunk) => {
+          setMessages((current) =>
+            current.map((msg) =>
+              msg.id === loadingMessageId
+                ? {
+                    ...msg,
+                    loading: false,
+                    text: msg.text + chunk,
+                  }
+                : msg,
+            ),
+          );
+        },
+        onStatus: (statusText) => {
+          setMessages((current) =>
+            current.map((msg) =>
+              msg.id === loadingMessageId && !msg.text
+                ? { ...msg, statusText }
+                : msg,
+            ),
+          );
+        },
+        onDone: (data) => {
+          setMessages((current) =>
+            current.map((msg) =>
+              msg.id === loadingMessageId
+                ? {
+                    ...msg,
+                    loading: false,
+                    text: data.response_text || msg.text,
+                    time: formatTime(),
+                    needsClarification: data.requires_clarification,
+                    calendarEvents: data.calendar_events,
+                  }
+                : msg,
+            ),
+          );
+          if (data.timeline_items_referenced?.length) {
+            mutateTimeline();
+          }
+        },
+        onError: (errMessage) => {
+          setMessages((current) =>
+            current.map((existing) =>
+              existing.id === loadingMessageId
+                ? {
+                    id: loadingMessageId,
+                    role: "assistant",
+                    text: `${errMessage} Kiểm tra backend đã chạy chưa rồi thử lại.`,
+                    time: formatTime(),
+                    isError: true,
+                    retryText: text,
+                  }
+                : existing,
+            ),
+          );
+        },
+      });
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Không thể kết nối tới StudyPulse.";
       setMessages((current) =>
