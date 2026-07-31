@@ -25,17 +25,16 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-from mcp_bridge.http_mcp_client import call_tool_text as gmail_call_tool_text
+import re
+from mcp_bridge.gmail_client import call_gmail_tool
 from mcp_bridge.outlook_client import call_tool_text as outlook_call_tool_text
-from tools._shared import GMAIL_MCP_URL
 
 from .graph import get_compiled_graph
 from .state import SourcePlatform
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LOOKBACK_DAYS = 3
+DEFAULT_LOOKBACK_DAYS = 30
 DEFAULT_MAX_RESULTS = 25
 
 
@@ -81,25 +80,57 @@ def fetch_gmail_messages(
     days: int = DEFAULT_LOOKBACK_DAYS,
     max_results: int = DEFAULT_MAX_RESULTS,
 ) -> list[dict[str, Any]]:
-    """Recent Gmail threads via search_threads(output="json") — see
-    codebase/mcp/gmail_mcp/tools.py's _thread_summary_json."""
-    text = asyncio.run(gmail_call_tool_text(
-        GMAIL_MCP_URL,
-        "search_threads",
-        {"query": f"newer_than:{days}d", "max_results": str(max_results), "output": "json"},
-    ))
-    threads = json.loads(text)
-    return [
-        {
-            "message_id": t.get("thread_id", ""),
-            "subject": t.get("subject", ""),
-            "from": t.get("from", ""),
-            "body_preview": t.get("snippet", ""),
-            "received_at": t.get("date", ""),
-            "is_unread": bool(t.get("is_unread", False)),
-        }
-        for t in threads
-    ]
+    """Recent Gmail threads via search_threads."""
+    try:
+        text = asyncio.run(call_gmail_tool(
+            "search_threads",
+            {"query": f"newer_than:{days}d", "max_results": str(max_results), "output": "json"},
+        ))
+        try:
+            threads = json.loads(text)
+            if isinstance(threads, list):
+                return [
+                    {
+                        "message_id": t.get("thread_id", t.get("id", "")),
+                        "subject": t.get("subject", ""),
+                        "from": t.get("from", ""),
+                        "body_preview": t.get("snippet", t.get("body_preview", "")),
+                        "received_at": t.get("date", t.get("received_at", "")),
+                        "is_unread": bool(t.get("is_unread", True)),
+                    }
+                    for t in threads
+                ]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Fallback text parsing if output was formatted string from _fallback_search_threads
+        results = []
+        blocks = text.split("\n- ")
+        for block in blocks:
+            if "thread_id:" not in block and "Thread ID:" not in block:
+                continue
+            lines = [l.strip() for l in block.strip().split("\n") if l.strip()]
+            header_line = lines[0] if lines else ""
+            t_match = re.search(r"(?:thread_id|Thread ID):\s*([a-f0-9]+)", header_line, re.IGNORECASE)
+            thread_id = t_match.group(1) if t_match else ""
+            subj_match = re.search(r"Tiêu đề:\s*(.*?)(?:\n|$)|^\*\*(.*?)\*\*", block)
+            subject = (subj_match.group(1) or subj_match.group(2)) if subj_match else "Gmail Email"
+            from_match = re.search(r"Từ:\s*(.*?)(?:\n|$)|from\s+\"?(.*?)\"?\s*·", block)
+            sender = (from_match.group(1) or from_match.group(2)) if from_match else "Gmail User"
+            
+            snippet = block
+            results.append({
+                "message_id": thread_id,
+                "subject": subject.strip(),
+                "from": sender.strip(),
+                "body_preview": snippet,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "is_unread": True,
+            })
+        return results
+    except Exception as exc:
+        logger.error("Failed to fetch gmail messages: %s", exc)
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -133,6 +164,7 @@ def _fetch_outlook_body(message_id: str) -> str:
 
 
 def _fetch_gmail_body(thread_id: str) -> str:
+    return asyncio.run(call_gmail_tool("get_thread", {"thread_id": thread_id}))
     # get_thread has no output=json mode (it's a free-text summary of every
     # message in the thread) — that's fine, ai_extraction_node's prompt
     # takes free text either way.

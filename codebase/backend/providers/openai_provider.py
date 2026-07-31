@@ -29,11 +29,20 @@ class OpenAIProvider:
         except ImportError as exc:
             raise RuntimeError("Install live provider dependency first: pip install openai") from exc
 
-        api_key = os.getenv(self.api_key_env)
+        api_key = (
+            os.getenv(self.api_key_env)
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+        )
         if not api_key:
-            raise RuntimeError(f"Missing API key env var: {self.api_key_env}")
+            raise RuntimeError(f"Missing API key env var: {self.api_key_env} (or GEMINI_API_KEY / GOOGLE_API_KEY)")
 
-        return OpenAI(api_key=api_key, base_url=self.base_url)
+        base_url = self.base_url
+        if not base_url and (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")) and not os.getenv("OPENAI_API_KEY"):
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+        return OpenAI(api_key=api_key, base_url=base_url)
 
     def complete(
         self,

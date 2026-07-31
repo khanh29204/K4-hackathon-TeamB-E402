@@ -68,7 +68,17 @@ def client_secrets_path() -> Path:
 
 
 def token_path() -> Path:
-    return Path(os.environ.get("GOOGLE_CALENDAR_TOKEN_FILE", str(_CREDENTIALS_DIR / "token.json")))
+    default_target = _CREDENTIALS_DIR / "token.json"
+    env_path = os.environ.get("GOOGLE_CALENDAR_TOKEN_FILE")
+    if env_path:
+        p = Path(env_path)
+        if p.exists():
+            return p
+        # If p doesn't exist relative to CWD, try resolving filename inside _CREDENTIALS_DIR
+        candidate = _CREDENTIALS_DIR / p.name
+        if candidate.exists():
+            return candidate
+    return default_target
 
 
 def redirect_uri() -> str:
@@ -129,13 +139,17 @@ def load_credentials() -> Credentials | None:
     path = token_path()
     if not path.exists():
         return None
-    creds = Credentials.from_authorized_user_file(str(path), SCOPES)
-    if creds.valid:
-        return creds
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _save(creds)
-        return creds
+    try:
+        creds = Credentials.from_authorized_user_file(str(path))
+        if creds.valid:
+            return creds
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            _save(creds)
+            return creds
+    except Exception as exc:
+        logging.warning("Failed to load/refresh Google credentials (%s)", exc)
+        return None
     return None
 
 

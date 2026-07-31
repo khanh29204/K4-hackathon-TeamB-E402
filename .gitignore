@@ -10,3 +10,5 @@ __pycache__/
 codebase/backend/credentials/*.json
 codebase/backend/transcripts/*.json
 .run/
+studypulse_data*
+checkpoints.sqlite*

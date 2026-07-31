@@ -14,10 +14,13 @@ Changes from v1:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .state import (
     StudyPulseState,
@@ -289,46 +292,72 @@ def ai_extraction_node(state: StudyPulseState) -> StudyPulseState:
     # ── PRODUCTION LLM CALL ──
     from providers import make_provider
 
-    provider = make_provider("openai")
-    result: ExtractionResult = provider.parse(
-        [
-            {"role": "system", "content": get_base_persona()},  # ~120 tokens, CACHED
-            {"role": "user", "content": get_extraction_prompt(  # Task-specific, fresh
-                text=text,
-                source_platform=source,
-                today=today,
-                current_year=current_year,
-            )},
-        ],
-        response_format=ExtractionResult,
-    )
-    extracted_items = [
-        ExtractedItem(
-            source_platform=(
-                SourcePlatform(source)
-                if source in [e.value for e in SourcePlatform]
-                else SourcePlatform.DIRECT_INPUT
-            ),
-            source_message_id=raw.get("message_id", str(uuid.uuid4())),
-            language_detected=Language(language),
-            pii_masked=True,
-            raw_snippet=text[:500],
-            meeting_link=item.meeting_link,
-            naming_convention=item.naming_convention,
-            required_materials=item.required_materials,
-            category=item.category,
-            title=item.title,
-            description=item.description,
-            due_date=item.due_date,
-            due_time=item.due_time,
-            time_unspecified=item.time_unspecified,
-            priority=item.priority,
-            confidence_score=item.confidence_score,
-            requires_clarification=item.requires_clarification,
-            conflict_detected=item.conflict_detected,
-        ).model_dump()
-        for item in result.items
-    ]
+    try:
+        provider = make_provider("openai")
+        result: ExtractionResult = provider.parse(
+            [
+                {"role": "system", "content": get_base_persona()},  # ~120 tokens, CACHED
+                {"role": "user", "content": get_extraction_prompt(  # Task-specific, fresh
+                    text=text,
+                    source_platform=source,
+                    today=today,
+                    current_year=current_year,
+                )},
+            ],
+            response_format=ExtractionResult,
+        )
+        extracted_items = [
+            ExtractedItem(
+                source_platform=(
+                    SourcePlatform(source)
+                    if source in [e.value for e in SourcePlatform]
+                    else SourcePlatform.DIRECT_INPUT
+                ),
+                source_message_id=raw.get("message_id", str(uuid.uuid4())),
+                language_detected=Language(language),
+                pii_masked=True,
+                raw_snippet=text[:500],
+                meeting_link=item.meeting_link,
+                naming_convention=item.naming_convention,
+                required_materials=item.required_materials,
+                category=item.category,
+                title=item.title,
+                description=item.description,
+                due_date=item.due_date,
+                due_time=item.due_time,
+                time_unspecified=item.time_unspecified,
+                priority=item.priority,
+                confidence_score=item.confidence_score,
+                requires_clarification=item.requires_clarification,
+                conflict_detected=item.conflict_detected,
+            ).model_dump()
+            for item in result.items
+        ]
+    except Exception as exc:
+        logger.warning("AI extraction LLM call failed (%s), creating fallback ExtractedItem from raw metadata", exc)
+        subject = raw.get("subject") or "Thông báo Email"
+        sender = raw.get("from", "")
+        body_preview = text[:500]
+        is_urgent = any(kw in (subject + body_preview).lower() for kw in ["quan trọng", "khẩn", "urgent", "important", "notice", "alert", "warning", "đóng", "hạn"])
+        priority_val = Priority.HIGH if is_urgent else Priority.MEDIUM
+        extracted_items = [
+            ExtractedItem(
+                source_platform=(
+                    SourcePlatform(source)
+                    if source in [e.value for e in SourcePlatform]
+                    else SourcePlatform.DIRECT_INPUT
+                ),
+                source_message_id=raw.get("message_id", str(uuid.uuid4())),
+                category=ItemCategory.OTHER,
+                title=subject,
+                description=f"Từ: {sender}\nNội dung: {body_preview}",
+                priority=priority_val,
+                confidence_score=0.9,
+                language_detected=Language(language),
+                pii_masked=True,
+                raw_snippet=body_preview,
+            ).model_dump()
+        ]
 
     # Aggregate confidence
     avg_conf = (
@@ -478,6 +507,12 @@ def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
     language = state.get("language", "vi")
     intent = state.get("intent", "general")
     timeline = state.get("dashboard_timeline", [])
+    if not timeline:
+        try:
+            from .storage import get_db
+            timeline = get_db().get_all_timeline()
+        except Exception:
+            timeline = []
     user_profile = dict(state.get("user_profile", {}))
     chat_history = list(state.get("chat_history", []))
 
@@ -537,16 +572,50 @@ def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
 
     # Inject Long-Term user profile context into RAG prompt
     profile_context = f"USER PROFILE (LONG-TERM MEMORY): {json.dumps(user_profile)}\n" if user_profile else ""
+    # Rank timeline items by priority and keyword relevance so important emails are placed at top of LLM context
+    # Dynamic relevance scoring based on user query tokens and item priority
+    q_words = set(re.findall(r"\w+", query.lower()))
+    def _score_item(item: dict[str, Any]) -> float:
+        text = f"{item.get('title', '')} {item.get('description', '')} {item.get('source_platform', '')}".lower()
+        score = 0.0
+        p = str(item.get("priority", "")).lower()
+        if p in ["high", "critical", "urgent"]:
+            score += 10.0
+        elif p == "medium":
+            score += 5.0
+        # Dynamic query term matching (exact and substring matches for words length > 2)
+        score += sum(5.0 for w in q_words if len(w) > 2 and w in text)
+        return score
+
+    sorted_timeline = sorted(timeline, key=_score_item, reverse=True)
+
     prompt_text = profile_context + get_rag_prompt(
         query=query,
         language=language,
         rag_context=retrieved_docs,
-        timeline_data=json.dumps(timeline[:10]),
+        timeline_data=json.dumps(sorted_timeline[:15], ensure_ascii=False),
     )
     messages.append({"role": "user", "content": prompt_text})
 
-    result: ChatResponse = provider.parse(messages, response_format=ChatResponse, temperature=0.2)
-    response_text = result.response_text
+    try:
+        result: ChatResponse = provider.parse(messages, response_format=ChatResponse, temperature=0.2)
+        response_text = result.response_text
+    except Exception as exc:
+        logger.warning("RAG Chatbot LLM call failed (%s), generating answer from persisted timeline items", exc)
+        matching_items = [
+            item for item in timeline
+            if any(w in f"{item.get('title', '')} {item.get('description', '')}".lower() for w in q_words if len(w) > 2)
+        ]
+        if matching_items:
+            lines = [f"Tìm thấy {len(matching_items)} email/thông báo phù hợp trong hệ thống:"]
+            for idx, item in enumerate(matching_items[:5], 1):
+                t = item.get("title", "")
+                d = item.get("description", "")
+                platform = item.get("source_platform", "gmail")
+                lines.append(f"{idx}. [{platform.upper()}] **{t}**\n   {d}")
+            response_text = "\n\n".join(lines)
+        else:
+            response_text = "Không tìm thấy email hoặc thông báo phù hợp trong hệ thống. Vui lòng làm mới hoặc kiểm tra hòm thư kết nối."
 
     # ── TOKEN USAGE TRACKING ──
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}

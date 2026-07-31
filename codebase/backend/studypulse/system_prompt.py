@@ -212,3 +212,4 @@ def get_reminder_prompt(target_date: str, items_json: str, language: str) -> str
 def get_system_prompt() -> str:
     """Legacy: return base persona + boundary rules combined."""
     return BASE_PERSONA + "\n" + BOUNDARY_RULES_SHORT
+    
