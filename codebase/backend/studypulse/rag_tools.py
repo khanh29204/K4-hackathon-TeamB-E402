@@ -29,9 +29,17 @@ shape).
   extracted as a deadline/exam/etc — mail outside the ingestion lookback
   window, a specific message the student wants read in full, or Discord
   history in a channel/guild that was never (or not yet) ingested are all
-  invisible to those two tools and need a live call instead. Read-only —
-  no write/create tool (e.g. calendar_create_event) is wired in here yet;
-  see execute_rag_tool's docstring for why.
+  invisible to those two tools and need a live call instead. Read-only.
+- create_calendar_event: the one WRITE tool here — creates a real Google
+  Calendar event. Gated by the underlying tool itself (TOOL_FUNCTIONS'
+  calendar_create_event, also used by server.py's confirm_calendar/"Thêm
+  vào lịch" button): called with confirmed omitted/false it does nothing
+  but describe what it *would* create, called with confirmed=true it
+  actually writes the event. rag_chatbot_node's tool loop has no
+  pause/resume (interrupt) mechanism the way hitl_escalation does for
+  ingestion, so the confirm step has to span two separate /api/v1/chat
+  turns instead of one — see RAG_AGENT_TOOL_GUIDANCE for the exact
+  two-turn protocol this relies on.
 
 search_timeline/query_timeline return the same compact item shape so the
 calling node can accumulate sources_cited/timeline_items_referenced
@@ -263,6 +271,46 @@ RAG_TOOL_DECLARATIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": (
+                "Add a real event to the student's Google Calendar — the only WRITE tool "
+                "available. Two-step, spanning two separate chat turns: call with confirmed "
+                "omitted/false first, which does NOT create anything — it only checks the "
+                "details are valid and returns a needs_confirmation result. Restate exactly "
+                "what will be created (title, date/time, any meet link) in your response_text "
+                "as a plain question and STOP — do not call this tool again in the same turn. "
+                "Only on a LATER turn, after the student's own next message clearly says yes/"
+                "confirms (not just continues the conversation), call it again with confirmed=true "
+                "using the exact same details. Never set confirmed=true on the first call, and "
+                "never infer confirmation from anything other than an explicit yes in the "
+                "student's own following message."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Event title."},
+                    "start": {"type": "string", "description": "ISO 8601 start, e.g. 2026-08-05T15:00:00+07:00."},
+                    "end": {"type": "string", "description": "ISO 8601 end."},
+                    "description": {"type": "string"},
+                    "location": {"type": "string"},
+                    "timezone": {"type": "string", "description": "e.g. Asia/Ho_Chi_Minh."},
+                    "add_meet_link": {
+                        "type": "boolean",
+                        "description": "Attach a real, freshly-generated Google Meet link. Never write a meet.google.com URL yourself — it won't be a working meeting.",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true to actually create the event — only set true on a later turn, after the student explicitly confirmed.",
+                        "default": False,
+                    },
+                },
+                "required": ["summary", "start", "end"],
+            },
+        },
+    },
 ]
 
 
@@ -361,6 +409,20 @@ def execute_rag_tool(name: str, args: dict[str, Any]) -> tuple[str, list[dict[st
             from tools import TOOL_FUNCTIONS
 
             result = TOOL_FUNCTIONS[name](**args)
+            return json.dumps(result, ensure_ascii=False, default=str), []
+        if name == "create_calendar_event":
+            from tools import TOOL_FUNCTIONS
+
+            result = TOOL_FUNCTIONS["calendar_create_event"](
+                summary=args.get("summary", ""),
+                start=args.get("start", ""),
+                end=args.get("end", ""),
+                description=args.get("description", ""),
+                location=args.get("location", ""),
+                timezone=args.get("timezone", ""),
+                add_meet_link=bool(args.get("add_meet_link", False)),
+                confirmed=bool(args.get("confirmed", False)),
+            )
             return json.dumps(result, ensure_ascii=False, default=str), []
         if name == "search_timeline":
             from .vector_store import get_vector_store

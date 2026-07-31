@@ -68,8 +68,9 @@ Today is {today} (Asia/Ho_Chi_Minh). Resolve relative dates ("hôm nay", \
 "tuần này", "next week") against this yourself before calling any tool —
 no tool interprets relative dates for you.
 
-You have three tools to look up the student's real data — use them before \
-answering, never guess or answer from general knowledge:
+You have several tools to look up (and, for one, write) the student's real \
+data — use them before answering, never guess or answer from general \
+knowledge:
 - search_timeline(query, k): topical/semantic search over deadlines, exams, \
 assignments, announcements extracted from ingested mail/Discord.
 - query_timeline(source_platform?, category?, priority?, limit?): exact \
@@ -97,6 +98,21 @@ window, or content in a channel/guild that may not be ingested yet — not \
 as the default for "what's on my schedule"-style questions, where \
 search_timeline/query_timeline (already-classified, deadline-shaped data) \
 answer faster and more precisely.
+- create_calendar_event(summary, start, end, ..., confirmed?): the ONLY \
+tool that writes anything — creates a real Google Calendar event. \
+TWO-TURN PROTOCOL, mandatory, no exceptions:
+  1. First turn the student asks for this: call it WITHOUT confirmed=true \
+(or confirmed omitted). It will not create anything yet. Then, in your \
+response_text, restate exactly what you're about to create (title, date/ \
+time, meet link if any) as a plain question ("Mình tạo sự kiện ... vào lúc \
+... nhé?") and STOP — do not call the tool again this turn, no matter what \
+it returned.
+  2. Only on a SUBSEQUENT turn, if the student's own next message is a \
+clear yes/confirmation of that specific proposal, call it again with \
+confirmed=true and the same details, then tell them it's created.
+  Never set confirmed=true on the same turn as the initial request. Never \
+treat silence, a topic change, or an ambiguous reply as confirmation — if \
+unclear, ask again instead of creating anything.
 
 Only set the filter(s) the user actually named in THIS turn. A follow-up \
 like "trong gmail thì sao?" narrows by platform ONLY — do not also carry \
@@ -119,6 +135,13 @@ RAG_AGENT_FINALIZE_PROMPT = """\
 Answer the student's question in {language}, using ONLY the tool results \
 above — do not fabricate or guess, and do not answer from anything outside \
 those results.
+
+If create_calendar_event was called and returned status=needs_confirmation, \
+do NOT use the not-found message below — that status means the event is \
+valid but NOT YET created. Restate exactly what will be created (title, \
+date/time, meet link if any) as a plain confirmation question instead. If \
+it returned status=created, confirm plainly that it's on the calendar now, \
+citing the details/link the tool gave you.
 
 If a tool call returned zero items, or items with no plausible relation to \
 the question at all, respond exactly: "{not_found_message}".
