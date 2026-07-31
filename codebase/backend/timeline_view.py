@@ -78,4 +78,12 @@ def to_card(item: dict[str, Any]) -> dict[str, Any]:
         "verified": bool(verified),
         "due_date_iso": due_date_iso,
         "due_time_iso": due_time_iso,
+        # Original message text this item was extracted from, for the
+        # in-app source-toggle button (EventCard.jsx) — and, separately,
+        # source_url: a real deep link to the original message/channel when
+        # the ingesting module could build one (see mail_ingest.py /
+        # discord_ingest.py). Empty for direct_input or anything ingested
+        # before source_url existed on ExtractedItem.
+        "raw_snippet": item.get("raw_snippet", ""),
+        "source_url": item.get("source_url", ""),
     }

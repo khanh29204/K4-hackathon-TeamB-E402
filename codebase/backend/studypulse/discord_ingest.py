@@ -35,6 +35,7 @@ from typing import Any
 from mcp_bridge.http_mcp_client import call_tool_text
 from tools._shared import DISCORD_MCP_URL
 
+from . import ingest_status
 from .graph import get_compiled_graph
 from .state import SourcePlatform
 
@@ -117,10 +118,16 @@ def chunk_messages(messages: list[dict[str, Any]], max_chars: int = DEFAULT_CHUN
 # INGEST
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _ingest_chunk(channel_id: str, chunk_index: int, chunk_text: str) -> dict[str, Any]:
+def _ingest_chunk(channel_id: str, chunk_index: int, chunk_text: str, *, guild_id: str = "") -> dict[str, Any]:
     raw_payload = {
         "source_platform": SourcePlatform.DISCORD.value,
         "message_id": f"{channel_id}:chunk-{chunk_index}",
+        # Channel-level, not message-level — a chunk merges several
+        # messages (see chunk_messages), so there's no single message id
+        # left to link to by the time extraction sees it. guild_id is
+        # required for Discord's own URL scheme to resolve the channel at
+        # all; omitted (empty link) when the caller doesn't have it.
+        "source_url": f"https://discord.com/channels/{guild_id}/{channel_id}" if guild_id else "",
         "body": chunk_text,
         "channel_id": channel_id,
     }
@@ -129,7 +136,7 @@ def _ingest_chunk(channel_id: str, chunk_index: int, chunk_text: str) -> dict[st
     return get_compiled_graph().invoke(state, config=config)
 
 
-def ingest_channel(channel_id: str, *, max_messages: int = DEFAULT_MAX_MESSAGES_PER_CHANNEL) -> dict[str, Any]:
+def ingest_channel(channel_id: str, *, guild_id: str = "", max_messages: int = DEFAULT_MAX_MESSAGES_PER_CHANNEL) -> dict[str, Any]:
     """Fetch -> chunk -> ingest for one channel. Returns counts, not raw
     state, matching mail_ingest.ingest_new_mail's shape."""
     messages = fetch_channel_messages(channel_id, max_messages=max_messages)
@@ -138,7 +145,7 @@ def ingest_channel(channel_id: str, *, max_messages: int = DEFAULT_MAX_MESSAGES_
     errors = 0
     for i, chunk in enumerate(chunks):
         try:
-            _ingest_chunk(channel_id, i, chunk)
+            _ingest_chunk(channel_id, i, chunk, guild_id=guild_id)
             ingested += 1
         except Exception:
             logger.exception("Failed to ingest Discord channel %s chunk %d", channel_id, i)
@@ -173,13 +180,49 @@ def ingest_guild(guild_id: str, **kwargs: Any) -> dict[str, Any]:
         return {"guild_id": guild_id, "channels": 0, "results": [], "skipped": "guild_denylisted"}
 
     channels = _list_text_channels(guild_id)
-    results = [ingest_channel(c["id"], **kwargs) for c in channels]
+    results = []
+    for c in channels:
+        try:
+            results.append(ingest_channel(c["id"], guild_id=guild_id, **kwargs))
+        except Exception as exc:
+            # One channel the bot can't actually read (e.g. missing "Read
+            # Message History" in that specific channel's permission
+            # overrides, even though list_channels/the guild-level invite
+            # scope let it see the channel exists) used to abort every other
+            # channel in the guild too, since this loop used to be a bare
+            # list comprehension. Isolate it instead — same shape
+            # ingest_channel already uses per-chunk. No .env denylist entry
+            # needed for this case: a channel-permission 403 is expected and
+            # self-resolving (skip now, retried harmlessly next sync), not a
+            # channel an operator has to remember to opt out of by hand.
+            logger.exception("Failed to ingest Discord channel %s (guild %s) — skipping", c["id"], guild_id)
+            results.append({
+                "channel_id": c["id"],
+                "channel_name": c.get("name", ""),
+                "messages": 0,
+                "chunks": 0,
+                "ingested": 0,
+                "errors": 1,
+                "error": str(exc)[:200],
+            })
     return {"guild_id": guild_id, "channels": len(channels), "results": results}
+
+
+def _ingest_guild_and_track(guild_id: str, **kwargs: Any) -> None:
+    ingest_status.set_status(SourcePlatform.DISCORD.value, "running", guild_id=guild_id)
+    try:
+        result = ingest_guild(guild_id, **kwargs)
+        ingest_status.set_status(SourcePlatform.DISCORD.value, "done", **result)
+    except Exception as exc:
+        logger.exception("Discord ingestion failed for guild %s", guild_id)
+        ingest_status.set_status(SourcePlatform.DISCORD.value, "error", guild_id=guild_id, error=str(exc))
 
 
 def trigger_guild_ingestion_async(guild_id: str, **kwargs: Any) -> None:
     """Fire-and-forget, same shape as mail_ingest.trigger_ingestion_async —
     called from discord_connection.get_status() when it notices a guild id
-    it hasn't seen before."""
-    thread = threading.Thread(target=ingest_guild, args=(guild_id,), kwargs=kwargs, daemon=True)
+    it hasn't seen before. Progress is recorded in ingest_status (keyed by
+    source, not per-guild — one "discord" row is enough for the FE's
+    "is a sync in progress" loading state) for the FE to poll."""
+    thread = threading.Thread(target=_ingest_guild_and_track, args=(guild_id,), kwargs=kwargs, daemon=True)
     thread.start()

@@ -210,6 +210,44 @@ class StudyPulseDB:
             logger.error(f"Failed to read timeline items: {e}")
             return []
 
+    def query_timeline(
+        self,
+        *,
+        source_platform: Optional[str] = None,
+        category: Optional[str] = None,
+        priority: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Filtered timeline lookup backing the RAG chatbot's query_timeline
+        tool (studypulse/rag_tools.py) — exact platform/category/priority
+        filtering that embedding similarity search handles poorly, since
+        those are metadata, not semantic content. Every filter is optional
+        and combined with AND; no filters just returns the most recent
+        `limit` items."""
+        if not self._ensure_conn():
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_platform:
+            clauses.append("source_platform = ?")
+            params.append(source_platform)
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
+        if priority:
+            clauses.append("priority = ?")
+            params.append(priority)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        try:
+            cursor = self._conn.execute(
+                f"SELECT raw_json FROM timeline_items {where} ORDER BY due_date ASC LIMIT ?",
+                (*params, limit),
+            )
+            return [json.loads(row[0]) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to query timeline items: {e}")
+            return []
+
     def get_timeline_count(self) -> int:
         """Get total number of timeline items."""
         if not self._ensure_conn():

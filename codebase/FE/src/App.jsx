@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import useSWRMutation from "swr/mutation";
 import { initialMessages, initialPlatforms } from "./data.js";
@@ -12,9 +12,11 @@ import {
   getConnections,
   getDiscordInviteUrl,
   getGoogleAuthUrl,
+  getIngestStatus,
   getOutlookConnectStatus,
   startOutlookConnect,
 } from "./api/connections.js";
+import { HITL_KEY, approveHitlItem, getHitlItems, rejectHitlItem } from "./api/hitl.js";
 import { formatTime } from "./utils/formatters.js";
 import { generateUUID } from "./utils/uuid.js";
 import { parseOutlookDeviceCode } from "./utils/outlookDeviceCode.js";
@@ -41,6 +43,11 @@ export default function App() {
   const [outlookConnecting, setOutlookConnecting] = useState(false);
   const [outlookDeviceCode, setOutlookDeviceCode] = useState(null);
   const [googleUser, setGoogleUser] = useState({ connected: false, email: null });
+  const [ingestStatus, setIngestStatus] = useState({});
+  const ingestStatusRef = useRef({});
+  const ingestPollingRef = useRef(false);
+  const [showHitl, setShowHitl] = useState(false);
+  const [hitlBusyItemId, setHitlBusyItemId] = useState(null);
 
   const {
     data: events = [],
@@ -48,6 +55,13 @@ export default function App() {
     isLoading: timelineLoading,
     mutate: mutateTimeline,
   } = useSWR(TIMELINE_KEY, getTimeline);
+
+  const { data: hitlItems = [], mutate: mutateHitl } = useSWR(HITL_KEY, getHitlItems, {
+    // Approve/reject can leave items on other paused threads still pending,
+    // and a new low-confidence ingestion can land any time — poll like the
+    // timeline does rather than only refetching on explicit actions.
+    refreshInterval: 15000,
+  });
 
   const { trigger: triggerChat, isMutating: isSending } = useSWRMutation("studypulse-chat", (_key, { arg }) => sendChatMessage(arg));
 
@@ -73,6 +87,37 @@ export default function App() {
     }
   };
 
+  // Gmail/Outlook/Discord connects each trigger a fire-and-forget background
+  // sync (studypulse/mail_ingest.py, discord_ingest.py) — this polls its
+  // progress (studypulse/ingest_status.py) so the connections panel can show
+  // a "đang tải..." state instead of the timeline just silently filling in
+  // once the background thread finishes. Self-terminating: stops once no
+  // source is "running", and startIngestPolling() is safe to call from
+  // multiple triggers since ingestPollingRef guards against overlap.
+  const startIngestPolling = () => {
+    if (ingestPollingRef.current) return;
+    ingestPollingRef.current = true;
+    (async () => {
+      for (;;) {
+        let data;
+        try {
+          data = await getIngestStatus();
+        } catch {
+          break; // backend hiccup — next trigger (panel reopen, next connect) will retry
+        }
+        const justFinished = Object.entries(data).some(
+          ([source, info]) => ingestStatusRef.current[source]?.status === "running" && info.status !== "running",
+        );
+        ingestStatusRef.current = data;
+        setIngestStatus(data);
+        if (justFinished) mutateTimeline();
+        if (!Object.values(data).some((info) => info.status === "running")) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 2500));
+      }
+      ingestPollingRef.current = false;
+    })();
+  };
+
   // "pending"/"starting" mean the backend still has the sign-in container
   // open, waiting on the device-code login to finish — anything else is terminal.
   const applyOutlookConnectResult = (result) => {
@@ -81,6 +126,7 @@ export default function App() {
       notify(result.message || "Outlook đã kết nối.", "success");
       setOutlookConnecting(false);
       setOutlookDeviceCode(null);
+      startIngestPolling();
     } else if (result.status === "failed" || result.status === "timeout") {
       notify(result.message || "Kết nối Outlook thất bại, thử lại sau.", "error");
       setOutlookConnecting(false);
@@ -128,16 +174,24 @@ export default function App() {
       params.delete("reason");
       const query = params.toString();
       window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+      // Backend's Google OAuth callback already kicked off a background mail
+      // sync (server.py's google_connection_callback) before this redirect.
+      if (googleConnected === "1") startIngestPolling();
     }
     refreshConnections();
+    startIngestPolling(); // pick up a sync still running from before a page refresh
   }, []);
 
   useEffect(() => {
     // Re-check whenever the panel is opened — connecting Gmail (full-page
     // redirect) or Discord (opened in a new tab, no callback to us) both
     // happen outside this app, so the one-time fetch on initial load goes
-    // stale as soon as either completes.
-    if (showConnections) refreshConnections();
+    // stale as soon as either completes. refreshConnections() itself is what
+    // triggers Discord ingestion server-side (discord_connection.get_status()
+    // noticing a newly-joined guild), so poll right after it.
+    if (showConnections) {
+      refreshConnections().then(startIngestPolling);
+    }
   }, [showConnections]);
 
   const sendMessage = async (text) => {
@@ -332,6 +386,32 @@ export default function App() {
     }
   };
 
+  const approveHitl = async (item) => {
+    setHitlBusyItemId(item.id);
+    try {
+      await approveHitlItem(item.thread_id, item.id);
+      notify(`Đã thêm "${item.title}" vào dòng thời gian`, "success");
+      await Promise.all([mutateHitl(), mutateTimeline()]);
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Không thể duyệt mục này, thử lại sau.", "error");
+    } finally {
+      setHitlBusyItemId(null);
+    }
+  };
+
+  const rejectHitl = async (item) => {
+    setHitlBusyItemId(item.id);
+    try {
+      await rejectHitlItem(item.thread_id, item.id);
+      notify(`Đã từ chối "${item.title}"`, "info");
+      await mutateHitl();
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Không thể từ chối mục này, thử lại sau.", "error");
+    } finally {
+      setHitlBusyItemId(null);
+    }
+  };
+
   const dashboardProps = {
     events,
     timelineLoading,
@@ -347,8 +427,15 @@ export default function App() {
     onTogglePlatform: togglePlatform,
     onDisconnectGuild: disconnectDiscordGuild,
     outlookConnecting,
+    ingestStatus,
     showConnections,
     setShowConnections,
+    hitlItems,
+    onApproveHitl: approveHitl,
+    onRejectHitl: rejectHitl,
+    hitlBusyItemId,
+    showHitl,
+    setShowHitl,
   };
 
   const handleGoogleLogin = async () => {

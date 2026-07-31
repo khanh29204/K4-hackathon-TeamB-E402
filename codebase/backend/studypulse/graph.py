@@ -34,6 +34,7 @@ from .nodes import (
     emergency_alert_node,
 )
 from .guardrail import guardrail_node
+from .system_prompt import CONFIDENCE_WARN
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -94,7 +95,7 @@ def route_by_confidence(state: StudyPulseState) -> str:
         return "hitl_escalation"
 
     confidence = state.get("confidence_score", 0.0)
-    if confidence < 0.85:
+    if confidence < CONFIDENCE_WARN:
         return "hitl_escalation"
 
     return "dashboard_sync"

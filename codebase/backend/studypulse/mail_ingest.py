@@ -20,16 +20,20 @@ survivors get a follow-up full-body fetch.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 from mcp_bridge.http_mcp_client import call_tool_text as gmail_call_tool_text
 from mcp_bridge.outlook_client import call_tool_text as outlook_call_tool_text
 from tools._shared import GMAIL_MCP_URL
 
+from . import ingest_status
 from .graph import get_compiled_graph
 from .state import SourcePlatform
 
@@ -106,12 +110,15 @@ def fetch_gmail_messages(
 # PREFILTER — deterministic, zero LLM cost
 # ═══════════════════════════════════════════════════════════════════════════
 
-def prefilter(messages: list[dict[str, Any]], *, unread_only: bool = True) -> list[dict[str, Any]]:
+def prefilter(messages: list[dict[str, Any]], *, unread_only: bool = False) -> list[dict[str, Any]]:
     """Date window is already applied at fetch time (start_datetime/
-    newer_than); this is the read-state half of the prefilter — the single
-    biggest lever on LLM classification volume, since most inbox mail is
-    either old or already handled. Set unread_only=False to still index
-    (without necessarily re-classifying) mail the user asks about directly."""
+    newer_than); this is the read-state half of the prefilter. Defaults to
+    OFF: a student can easily have already read an important email (a
+    deadline notice, a schedule change) without StudyPulse ever indexing it
+    otherwise, which defeats "what's important" queries over exactly the
+    mail the student already opened. Set unread_only=True to opt back into
+    the old unread-only behavior (cheaper — fewer LLM classification calls
+    per sync) if inbox volume ever makes that worth trading off."""
     if not unread_only:
         return messages
     return [m for m in messages if m.get("is_unread")]
@@ -123,13 +130,35 @@ def prefilter(messages: list[dict[str, Any]], *, unread_only: bool = True) -> li
 # gmail_read_thread), just called from ingestion instead of the LLM.
 # ═══════════════════════════════════════════════════════════════════════════
 
+_HTML_TAG_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>|<[^>]+>", re.IGNORECASE | re.DOTALL)
+_HTML_BLANK_LINES_RE = re.compile(r"\n\s*\n+")
+
+
+def _html_to_text(raw_html: str) -> str:
+    """Same approach as gmail_mcp/tools.py's _html_to_text — duplicated
+    rather than imported since that lives in a separate MCP server package
+    (codebase/mcp/gmail_mcp), not this backend."""
+    text = _HTML_TAG_RE.sub("\n", raw_html)
+    text = html.unescape(text)
+    return _HTML_BLANK_LINES_RE.sub("\n\n", text).strip()
+
+
 def _fetch_outlook_body(message_id: str) -> str:
     text = asyncio.run(outlook_call_tool_text(
         "mail",
         {"operation": "get_message", "message_id": message_id, "output": "raw"},
     ))
     data = json.loads(text)
-    return (data.get("body") or {}).get("content", "") or data.get("bodyPreview", "")
+    body = data.get("body") or {}
+    content = body.get("content", "") or data.get("bodyPreview", "")
+    # Graph API defaults to HTML (body.contentType == "html") unless the
+    # caller sends a Prefer: outlook.body-content-type="text" header, which
+    # this MCP tool doesn't — unlike gmail_mcp's get_thread (which already
+    # strips HTML itself), so raw markup would otherwise flow straight into
+    # PII masking / extraction / the "Xem nguồn gốc" raw_snippet display.
+    if body.get("contentType", "").lower() == "html" and content:
+        return _html_to_text(content)
+    return content
 
 
 def _fetch_gmail_body(thread_id: str) -> str:
@@ -156,6 +185,21 @@ def _fetch_full_body(message: dict[str, Any], source: str) -> str:
 # INGEST — run survivors through the studypulse ingestion flow
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _mail_url(message_id: str, source: str) -> str:
+    """Deep link back to the original message — built here, not later at
+    display time, since this is the one place a bare Graph/Gmail id is still
+    unambiguously tied to its provider. Gmail's id is a thread_id (see
+    fetch_gmail_messages); Outlook's is a Graph message id needing URL
+    encoding (it routinely contains '/' and '+')."""
+    if not message_id:
+        return ""
+    if source == SourcePlatform.GMAIL.value:
+        return f"https://mail.google.com/mail/u/0/#all/{message_id}"
+    if source == SourcePlatform.OUTLOOK.value:
+        return f"https://outlook.office.com/mail/deeplink/read/{quote(message_id, safe='')}"
+    return ""
+
+
 def _ingest_one(message: dict[str, Any], source: str) -> dict[str, Any]:
     """One message through the compiled graph's ingestion flow (extraction
     -> validation -> confidence gate -> SQLite/FAISS, or HITL if
@@ -164,6 +208,7 @@ def _ingest_one(message: dict[str, Any], source: str) -> dict[str, Any]:
     raw_payload = {
         "source_platform": source,
         "message_id": message.get("message_id", ""),
+        "source_url": _mail_url(message.get("message_id", ""), source),
         "body": body,
         "subject": message.get("subject", ""),
         "from": message.get("from", ""),
@@ -174,7 +219,7 @@ def _ingest_one(message: dict[str, Any], source: str) -> dict[str, Any]:
     return get_compiled_graph().invoke(state, config=config)
 
 
-def ingest_new_mail(source: str, *, days: int = DEFAULT_LOOKBACK_DAYS, unread_only: bool = True) -> dict[str, Any]:
+def ingest_new_mail(source: str, *, days: int = DEFAULT_LOOKBACK_DAYS, unread_only: bool = False) -> dict[str, Any]:
     """Fetch -> prefilter -> ingest for one provider. Returns counts, not
     raw state, so callers (the connection-trigger hooks, or a manual
     re-sync endpoint later) don't need to know studypulse's internals."""
@@ -201,9 +246,23 @@ def ingest_new_mail(source: str, *, days: int = DEFAULT_LOOKBACK_DAYS, unread_on
     return result
 
 
+def _ingest_and_track(source: str, **kwargs: Any) -> None:
+    ingest_status.set_status(source, "running")
+    try:
+        result = ingest_new_mail(source, **kwargs)
+        # ingest_new_mail's own result dict already carries a "source" key
+        # (see its return statement) — spreading it verbatim collides with
+        # the positional `source` set_status also takes.
+        ingest_status.set_status(source, "done", **{k: v for k, v in result.items() if k != "source"})
+    except Exception as exc:
+        logger.exception("Mail ingestion failed for %s", source)
+        ingest_status.set_status(source, "error", error=str(exc))
+
+
 def trigger_ingestion_async(source: str, **kwargs: Any) -> None:
     """Fire-and-forget: run ingest_new_mail in a background thread so the
     caller (a connection-success handler) doesn't block its HTTP response
-    on a mailbox sync + LLM classification pass."""
-    thread = threading.Thread(target=ingest_new_mail, args=(source,), kwargs=kwargs, daemon=True)
+    on a mailbox sync + LLM classification pass. Progress is recorded in
+    ingest_status for the FE to poll (see that module's docstring)."""
+    thread = threading.Thread(target=_ingest_and_track, args=(source,), kwargs=kwargs, daemon=True)
     thread.start()

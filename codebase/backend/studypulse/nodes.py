@@ -35,7 +35,8 @@ from .state import (
 from .system_prompt import (
     get_base_persona,
     get_extraction_prompt,
-    get_rag_prompt,
+    get_rag_agent_tool_guidance,
+    get_rag_agent_finalize_prompt,
     get_evidence_prompt,
     get_hitl_prompt,
     get_reminder_prompt,
@@ -44,7 +45,9 @@ from .system_prompt import (
     CONFIDENCE_WARN,
     CONFIDENCE_CLARIFY,
     CONFIDENCE_REJECT,
+    NOT_FOUND_MESSAGE,
 )
+from .rag_tools import RAG_TOOL_DECLARATIONS, execute_rag_tool, items_to_citations
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -310,9 +313,10 @@ def ai_extraction_node(state: StudyPulseState) -> StudyPulseState:
                 else SourcePlatform.DIRECT_INPUT
             ),
             source_message_id=raw.get("message_id", str(uuid.uuid4())),
+            source_url=raw.get("source_url", ""),
             language_detected=Language(language),
             pii_masked=True,
-            raw_snippet=text[:500],
+            raw_snippet=text[:2000],
             meeting_link=item.meeting_link,
             naming_convention=item.naming_convention,
             required_materials=item.required_materials,
@@ -463,16 +467,24 @@ def dashboard_sync_node(state: StudyPulseState) -> StudyPulseState:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# NODE 7: RAG CHATBOT NODE (LLM call — BASE_PERSONA + RAG_CHATBOT_PROMPT)
+# NODE 7: RAG CHATBOT NODE (agentic — LLM decides when to call
+# search_timeline / query_timeline, see rag_tools.py, instead of always
+# being handed one fixed similarity_search(k=3) regardless of the question)
 # ═══════════════════════════════════════════════════════════════════════════
+
+MAX_RAG_TOOL_ROUNDS = 10
+
 
 def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
     """
     RAG chatbot with:
-    - Dynamic FAISS Vector Retrieval (replaces hardcoded docs)
-    - Token Usage Tracking (monitors LLM cost)
+    - Agentic retrieval: the LLM calls search_timeline (semantic) and/or
+      query_timeline (exact platform/category/priority filter) as needed,
+      possibly more than once, instead of one fixed pre-stuffed context —
+      see rag_tools.py's docstring for why two tools instead of one.
+    - Token Usage Tracking (monitors LLM cost, summed across tool rounds).
     - Short-Term Memory: Prepend previous chat history to LLM messages.
-    - Long-Term Memory: Prepend user profile context to RAG chatbot prompt.
+    - Long-Term Memory: Prepend user profile context to the first user turn.
     """
     query = state.get("user_query", "")
     language = state.get("language", "vi")
@@ -485,76 +497,111 @@ def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
     name_match = re.search(r"(?:tôi là|tên tôi là|mình tên là|tên mình là)\s*([A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝĐ][a-zàáâãèéêìíòóôõùúýđ]*(?:\s+[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝĐ][a-zàáâãèéêìíòóôõùúýđ]*)*)", query, re.IGNORECASE)
     if name_match:
         user_profile["user_name"] = name_match.group(1).strip()
-    
+
     id_match = re.search(r"(?:mã học viên|mã số học viên|ms hv|mshv)[:\s]*([A-Za-z0-9\-]+)", query, re.IGNORECASE)
     if id_match:
         user_profile["student_id"] = id_match.group(1).strip()
 
-    # ── DYNAMIC RAG RETRIEVAL (FAISS Vector Store) ──
-    sources_cited: list[dict[str, str]] = []
-    timeline_items_referenced: list[str] = []
-    try:
-        from .vector_store import get_vector_store
-        vs = get_vector_store()
-        # Index current timeline items if not already indexed
-        if timeline:
-            vs.index_timeline_items(timeline)
-        retrieved_docs = vs.similarity_search(query, k=3)
-        print(f"  [FAISS] Dynamic RAG: Retrieved {len(retrieved_docs.split('[Doc'))-1} relevant documents.")
+    # Items confirmed earlier in THIS SAME graph run (an ingestion flow that
+    # also happens to chat) — searchable immediately, on top of whatever
+    # vector_store._bootstrap_from_sqlite already loaded from prior runs.
+    if timeline:
+        try:
+            from .vector_store import get_vector_store
+            get_vector_store().index_timeline_items(timeline)
+        except Exception as e:
+            print(f"  [FAISS] Failed to index current-run timeline items: {e}")
 
-        # Same retrieval, metadata form — for citing which mail/item the
-        # answer is grounded in (FE's sources_cited / timeline_items_referenced).
-        for doc in vs.similarity_search_with_metadata(query, k=3):
-            item_id = doc.get("item_id", "")
-            if item_id:
-                timeline_items_referenced.append(item_id)
-            platform = doc.get("source_platform", "")
-            title = doc.get("title", "")
-            if platform == "gmail":
-                label = f"Email: {title}" if title else "Email gốc"
-            elif platform == "outlook":
-                label = f"Email Outlook: {title}" if title else "Email Outlook gốc"
-            elif title:
-                label = title
-            else:
-                continue
-            sources_cited.append({"label": label, "url": ""})
-    except Exception as e:
-        retrieved_docs = "VinAI Academy Mini Hackathon Day 1 Foundation & Day 2 Specs. [T01-001] Introduction to AI Hackathon."
-        print(f"  [FAISS] Fallback to static docs: {e}")
-
-    # ── PRODUCTION LLM CALL WITH TOKEN TRACKING ──
     from providers import make_provider
 
     provider = make_provider("openai")
     model_name = provider.default_model
 
     # 2. Short-Term Memory: previous chat history, as plain OpenAI-style messages
-    messages: list[dict[str, str]] = [{"role": "system", "content": get_base_persona()}]
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": get_base_persona() + "\n" + get_rag_agent_tool_guidance()},
+    ]
     for msg in chat_history:
         role = "user" if msg.get("role") == "user" else "assistant"
         messages.append({"role": role, "content": msg.get("content", "")})
 
-    # Inject Long-Term user profile context into RAG prompt
     profile_context = f"USER PROFILE (LONG-TERM MEMORY): {json.dumps(user_profile)}\n" if user_profile else ""
-    prompt_text = profile_context + get_rag_prompt(
-        query=query,
-        language=language,
-        rag_context=retrieved_docs,
-        timeline_data=json.dumps(timeline[:10]),
-    )
-    messages.append({"role": "user", "content": prompt_text})
+    messages.append({"role": "user", "content": profile_context + query})
 
+    # ── AGENTIC TOOL LOOP — LLM decides if/when/how many times to call
+    # search_timeline / query_timeline before answering. Tool results are
+    # fed back as plain user-role JSON blobs (not native tool_calls/tool-role
+    # messages) so this stays on the same Provider.complete()/ToolCall
+    # shape the rest of the codebase uses — no per-call ids to track. ──
+    sources_cited: list[dict[str, str]] = []
+    timeline_items_referenced: list[str] = []
+    seen_citation_keys: set[str] = set()
+    tool_calls_made: list[dict[str, Any]] = []
+    round_responses: list[Any] = []
+
+    for _round in range(MAX_RAG_TOOL_ROUNDS):
+        response = provider.complete(messages, tools=RAG_TOOL_DECLARATIONS, model=model_name, temperature=0.2)
+        round_responses.append(response)
+        print(f"  [RAG] round {_round}: {len(response.tool_calls)} tool call(s)"
+              + (f" -> {[c.name for c in response.tool_calls]}" if response.tool_calls else " (stopping)"))
+        if not response.tool_calls:
+            break
+
+        call_summary = [{"name": c.name, "args": c.args} for c in response.tool_calls]
+        messages.append({
+            "role": "assistant",
+            "content": f"{response.text or ''}\n\nTOOL_CALLS_JSON:\n{json.dumps(call_summary, ensure_ascii=False)}",
+        })
+
+        tool_events = []
+        for call in response.tool_calls:
+            tool_calls_made.append({"name": call.name, "args": call.args})
+            result_text, items = execute_rag_tool(call.name, call.args)
+            print(f"  [RAG]   {call.name}({call.args}) -> {len(items)} item(s)")
+            tool_events.append({"tool": call.name, "args": call.args, "result": json.loads(result_text)})
+
+            for item_id, citation in items_to_citations(items):
+                key = item_id or citation["label"]
+                if not key or key in seen_citation_keys:
+                    continue
+                seen_citation_keys.add(key)
+                if item_id:
+                    timeline_items_referenced.append(item_id)
+                sources_cited.append(citation)
+
+        messages.append({
+            "role": "user",
+            "content": (
+                f"TOOL_RESULTS_JSON:\n{json.dumps(tool_events, ensure_ascii=False)}\n\n"
+                "Call another tool if this doesn't fully answer the question, "
+                "otherwise answer now using only these results."
+            ),
+        })
+
+    # ── FINALIZE — one structured-output call for the ChatResponse shape
+    # the FE depends on, grounded in whatever the tool rounds above found. ──
+    messages.append({"role": "user", "content": get_rag_agent_finalize_prompt(query=query, language=language)})
     result: ChatResponse = provider.parse(messages, response_format=ChatResponse, temperature=0.2)
     response_text = result.response_text
 
-    # ── TOKEN USAGE TRACKING ──
+    # A tool call returning results doesn't mean those results actually
+    # answered the question — the model can (correctly) judge them
+    # irrelevant and still fall back to NOT_FOUND_MESSAGE in response_text.
+    # sources_cited/timeline_items_referenced are accumulated from every
+    # tool call unconditionally above, so without this they'd show a
+    # citation for an item the reply just said wasn't found. Treat the
+    # fallback message as authoritative: no citations when it's used.
+    if response_text.strip() == NOT_FOUND_MESSAGE.get(language, "").strip():
+        sources_cited = []
+        timeline_items_referenced = []
+
+    # ── TOKEN USAGE TRACKING (summed across every round + the finalize call) ──
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     try:
-        # Estimate token usage from message lengths (approximate)
-        input_text = " ".join(m["content"] for m in messages)
-        est_input = len(input_text) // 4  # ~4 chars per token estimate
-        est_output = len(response_text) // 4
+        est_input = 0
+        for m in messages:
+            est_input += len(m["content"]) // 4  # ~4 chars per token estimate
+        est_output = sum(len(r.text or "") for r in round_responses) // 4 + len(response_text) // 4
         token_usage = {
             "input_tokens": est_input,
             "output_tokens": est_output,
@@ -590,9 +637,10 @@ def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
     ).model_dump()
 
     metadata = _trace(state, "rag_chatbot_node")
-    metadata["prompt_architecture"] = "base_persona(cached) + short_term_history + long_term_profile + dynamic_faiss_rag"
+    metadata["prompt_architecture"] = "base_persona(cached) + short_term_history + long_term_profile + agentic_rag_tools"
     metadata["token_usage"] = token_usage
-    metadata["rag_source"] = "faiss_dynamic"
+    metadata["rag_source"] = "agentic_tools"
+    metadata["rag_tool_calls"] = tool_calls_made
 
     return {
         **state,

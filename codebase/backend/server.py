@@ -1,11 +1,9 @@
 """HTTP entrypoint for the StudyPulse agent, for the Vite/React frontend in
 codebase/FE. /api/v1/chat runs the studypulse/ LangGraph pipeline
-(compile_graph().invoke, see studypulse/graph.py) — NOT agent.run_model_tool_loop
-+ tools.TOOL_FUNCTIONS, which chat.py (the CLI) still uses; see the
-mail-rag-design migration artifact for why these two now diverge.
-TOOL_FUNCTIONS stays imported here only for calendar_create_event, called
-directly from confirm_calendar() outside any chat loop. See specs/UI.md for
-the response envelope /api/v1/chat follows.
+(compile_graph().invoke, see studypulse/graph.py). TOOL_FUNCTIONS is imported
+here only for calendar_create_event, called directly from confirm_calendar()
+outside the chat graph. See specs/UI.md for the response envelope
+/api/v1/chat follows.
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ import discord_connection
 import google_connection
 import outlook_connection
 from env_loader import load_backend_env
-from studypulse import hitl
+from studypulse import hitl, ingest_status
 from studypulse.graph import get_compiled_graph
 from studypulse.mail_ingest import trigger_ingestion_async
 from studypulse.storage import get_db
@@ -35,12 +33,10 @@ from timeline_view import to_card
 from tools import TOOL_FUNCTIONS
 
 ROOT = Path(__file__).parent
-ARTIFACTS_DIR = ROOT / "artifacts"
 load_backend_env(ROOT)
 
 # Cache-busting/debug marker for the FE — hashed from what actually drives
-# chat behavior now (studypulse's prompt), not artifacts/system_prompt.md
-# (that file only matters to chat.py's separate tool-calling loop).
+# chat behavior (studypulse's prompt).
 _ARTIFACT_VERSION = hashlib.sha256(
     (ROOT / "studypulse" / "system_prompt.py").read_bytes()
 ).hexdigest()[:12]
@@ -262,6 +258,32 @@ def get_connections() -> dict[str, Any]:
     discord_status = discord_connection.get_status()
     outlook_status = outlook_connection.get_status()
     return envelope(data={"google": google_status, "discord": discord_status, "outlook": outlook_status})
+
+
+@app.post("/api/v1/connections/{source}/resync")
+def resync_connection(source: str, unread_only: bool = False, days: int = 3) -> dict[str, Any]:
+    """Manually re-run mail ingestion for an already-connected mailbox,
+    outside the normal "just connected" trigger (server.py's Google OAuth
+    callback / outlook_connection's connect-flow) — e.g. to pick up mail
+    that arrived since the last sync, or (unread_only=false) mail that's
+    already been read but never made it into the timeline. Gmail/Outlook
+    only; Discord's ingestion is per-guild and triggered by
+    discord_connection.get_status() noticing a new guild, not by source
+    name here."""
+    if source not in ("gmail", "outlook"):
+        raise error_response(400, "UNSUPPORTED_SOURCE", "Resync only supports 'gmail' or 'outlook'.")
+    trigger_ingestion_async(source, unread_only=unread_only, days=days)
+    return envelope(data={"status": "started", "source": source})
+
+
+@app.get("/api/v1/connections/ingest-status")
+def get_ingest_status() -> dict[str, Any]:
+    """Progress of the background mail/Discord sync triggered right after a
+    connect (see studypulse/ingest_status.py) — the FE polls this to show a
+    loading state instead of the timeline just silently filling in whenever
+    the background thread finishes. Missing keys mean no sync has run yet
+    this process, which the FE treats the same as "idle"."""
+    return envelope(data=ingest_status.get_all())
 
 
 @app.get("/api/v1/connections/google/start")

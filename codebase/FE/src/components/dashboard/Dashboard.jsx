@@ -3,6 +3,7 @@ import { Icon } from "../common/Icon.jsx";
 import { QuickActions } from "./QuickActions.jsx";
 import { Connections } from "./Connections.jsx";
 import { EventCard } from "./EventCard.jsx";
+import { HitlReview } from "./HitlReview.jsx";
 import { TimelineSkeleton } from "./TimelineSkeleton.jsx";
 import { TimelineError } from "./TimelineError.jsx";
 
@@ -21,8 +22,15 @@ export function Dashboard({
   onTogglePlatform,
   onDisconnectGuild,
   outlookConnecting,
+  ingestStatus,
   showConnections,
   setShowConnections,
+  hitlItems,
+  onApproveHitl,
+  onRejectHitl,
+  hitlBusyItemId,
+  showHitl,
+  setShowHitl,
 }) {
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -45,17 +53,30 @@ export function Dashboard({
             <h2 className="mt-1 text-2xl font-extrabold tracking-tight text-ink md:text-3xl">Chào buổi chiều, Minh 👋</h2>
             <p className="mt-2 text-sm text-slate-500">Hỏi StudyPulse ở khung chat để bắt đầu tổng hợp deadline và lịch học thật.</p>
           </div>
-          <button onClick={() => setShowConnections(!showConnections)} className="flex w-fit items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-sm transition-colors hover:border-blue-300">
-            <Icon className="text-lg">settings_input_component</Icon>Quản lý kết nối
-          </button>
+          <div className="flex w-fit flex-wrap gap-2">
+            {hitlItems.length > 0 ? (
+              <button onClick={() => { setShowHitl(!showHitl); setShowConnections(false); }} className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-700 shadow-sm transition-colors hover:border-amber-300">
+                <Icon className="text-lg">warning</Icon>Cần duyệt ({hitlItems.length})
+              </button>
+            ) : null}
+            <button onClick={() => { setShowConnections(!showConnections); setShowHitl(false); }} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-sm transition-colors hover:border-blue-300">
+              <Icon className="text-lg">settings_input_component</Icon>Quản lý kết nối
+            </button>
+          </div>
         </div>
 
         <div className="mt-6">
           <QuickActions active={activeAction} onSelect={onAction} />
         </div>
 
-        {showConnections ? (
-          <div className="mt-6"><Connections platforms={platforms} onToggle={onTogglePlatform} onDisconnectGuild={onDisconnectGuild} outlookConnecting={outlookConnecting} /></div>
+        {showHitl ? (
+          <div className="mt-6">
+            <h2 className="text-lg font-extrabold text-ink">Mục cần duyệt</h2>
+            <p className="mt-1 text-xs text-slate-500">Trích xuất mơ hồ hoặc có mâu thuẫn — StudyPulse sẽ không tự thêm vào dòng thời gian cho đến khi bạn xác nhận.</p>
+            <HitlReview items={hitlItems} onApprove={onApproveHitl} onReject={onRejectHitl} busyItemId={hitlBusyItemId} />
+          </div>
+        ) : showConnections ? (
+          <div className="mt-6"><Connections platforms={platforms} onToggle={onTogglePlatform} onDisconnectGuild={onDisconnectGuild} outlookConnecting={outlookConnecting} ingestStatus={ingestStatus} /></div>
         ) : (
           <>
             <div className="mt-7 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">

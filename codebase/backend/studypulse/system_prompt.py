@@ -54,22 +54,63 @@ SOURCE TEXT:
 {text}
 """
 
-RAG_CHATBOT_PROMPT = """\
-Answer the student's question using ONLY the provided context documents and timeline data.
+NOT_FOUND_MESSAGE = {
+    "vi": "Không tìm thấy trong tài liệu chính thức",
+    "en": "Not found in official materials",
+}
 
-RULES:
-- Cite sources using [Txx-NNN] transcript codes or source_platform + message_id.
-- If answer not found in context, respond: "Không tìm thấy trong tài liệu chính thức" (VI) or "Not found in official materials" (EN).
-- Do not fabricate information. Do not guess deadlines.
-- For deadline queries: list items sorted by due_date, include confidence indicators.
+RAG_AGENT_TOOL_GUIDANCE = """\
+You have two tools to look up the student's real, ingested timeline data — \
+use them before answering, never guess or answer from general knowledge:
+- search_timeline(query, k): topical/semantic search over deadlines, exams, \
+assignments, announcements.
+- query_timeline(source_platform?, category?, priority?, limit?): exact \
+filter by platform/category/priority. Use this — not search — for "on \
+Gmail", "just exams", "critical only", or a follow-up narrowing an earlier \
+answer that way (e.g. "trong gmail thì sao?" after a general question).
 
-CONTEXT DOCUMENTS:
-{rag_context}
+Only set the filter(s) the user actually named in THIS turn. A follow-up \
+like "trong gmail thì sao?" narrows by platform ONLY — do not also carry \
+over a priority filter just because an earlier turn asked about \
+"important" items; "important" is not the same as priority=critical/high, \
+and stacking an unrequested filter on top of the one the user did ask for \
+will wrongly return zero results for data that actually exists.
 
-TIMELINE DATA:
-{timeline_data}
+If a query_timeline call comes back empty, retry once with fewer filters \
+(or fall back to search_timeline) before concluding nothing was found — an \
+empty result often means over-filtering, not missing data.
 
-STUDENT QUESTION ({language}):
+Call at least one tool before answering, unless the message is only small \
+talk. You may call more than once (e.g. a broad search, then a filtered \
+follow-up, or a retry with fewer filters) if the first result doesn't \
+answer the question.
+"""
+
+RAG_AGENT_FINALIZE_PROMPT = """\
+Answer the student's question in {language}, using ONLY the tool results \
+above — do not fabricate or guess, and do not answer from anything outside \
+those results.
+
+If a tool call returned zero items, or items with no plausible relation to \
+the question at all, respond exactly: "{not_found_message}".
+
+Otherwise, ALWAYS report the items a tool call actually returned. Judge \
+"important"/"urgent" by each item's own priority field, not by whether it \
+matches a specific filter value you happened to query with:
+- If any returned item has priority high or critical, that item IS what \
+  the student asked for — present it directly as an important/urgent item, \
+  do NOT say nothing important was found and then list it anyway.
+- If the highest priority among the returned items is only medium or low, \
+  say plainly that nothing urgent/critical turned up, then list what did \
+  (title, priority, platform) — a real item is still strictly more useful \
+  than a blank "not found".
+Do not silently drop real items just because a filter you chose didn't \
+match them — under-reporting real data is as much a failure as fabricating \
+it.
+
+Cite items naturally by title where relevant. Do not invent deadlines.
+
+STUDENT QUESTION:
 {query}
 """
 
@@ -113,7 +154,6 @@ Generate a consolidated daily reminder for tomorrow's deadlines ({target_date}) 
 For each item:
 1. List the title, priority, and due time.
 2. Under each item, add a brief 2-3 line summary of the content/requirements that the student needs to prepare, extracted from its description and raw snippet. Write this wittily and concisely.
-3. Strictly DO NOT use any emojis, icons, or visual symbols in the message. Keep the tone professional but warm/cute.
 
 ITEMS DUE TOMORROW:
 {items_json}
@@ -139,7 +179,7 @@ BOUNDARIES:
 # ═══════════════════════════════════════════════════════════════════════════
 
 CONFIDENCE_AUTO_APPROVE = 0.95
-CONFIDENCE_WARN = 0.85
+CONFIDENCE_WARN = 0.70
 CONFIDENCE_CLARIFY = 0.70
 CONFIDENCE_REJECT = 0.70  # Below this → HITL
 
@@ -163,13 +203,19 @@ def get_extraction_prompt(text: str, source_platform: str, today: str, current_y
     )
 
 
-def get_rag_prompt(query: str, language: str, rag_context: str, timeline_data: str) -> str:
-    """Assemble RAG chatbot prompt with retrieved context."""
-    return RAG_CHATBOT_PROMPT.format(
+def get_rag_agent_tool_guidance() -> str:
+    """Additive system-prompt guidance for the tool-calling rounds of
+    rag_chatbot_node — when to call search_timeline vs query_timeline."""
+    return RAG_AGENT_TOOL_GUIDANCE
+
+
+def get_rag_agent_finalize_prompt(query: str, language: str) -> str:
+    """Assemble the finalize-turn instruction, once the tool-calling rounds
+    are done and rag_chatbot_node asks for the structured ChatResponse."""
+    return RAG_AGENT_FINALIZE_PROMPT.format(
         query=query,
         language=language,
-        rag_context=rag_context,
-        timeline_data=timeline_data,
+        not_found_message=NOT_FOUND_MESSAGE.get(language, NOT_FOUND_MESSAGE["vi"]),
     )
 
 

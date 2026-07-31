@@ -188,10 +188,16 @@ class ExtractedItem(BaseModel):
     extracted_by: str = "studypulse_ai_v1"
     language_detected: Language = Language.VI
     pii_masked: bool = False
-    raw_snippet: str = Field(default="", max_length=500)
+    raw_snippet: str = Field(default="", max_length=2000)
     meeting_link: Optional[str] = None
     naming_convention: Optional[str] = None
     required_materials: Optional[str] = None
+    # Deep link back to the original message, when the ingesting module
+    # could build one from IDs only it has in scope (thread_id for Gmail,
+    # message_id for Outlook, guild_id+channel_id for Discord) — see
+    # mail_ingest.py/discord_ingest.py's raw_payload construction. Empty for
+    # direct_input or anything ingested before this field existed.
+    source_url: str = ""
 
 
 class SourceCitation(BaseModel):

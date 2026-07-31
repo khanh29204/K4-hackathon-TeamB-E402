@@ -1,19 +1,20 @@
 # StudyPulse backend agent
 
-A real tool-calling agent (system prompt + `tools.yaml` + a tool-execution
-loop, in the style of `example/Day04-.../starter_v0`) wired to the MCP
-integrations in `codebase/mcp/`: **Gmail** (`gmail_mcp`), **Discord**
-(`discord_mcp`), and **Google Calendar** (`google_calendar_mcp`). Outlook is
-intentionally not wired up yet.
+FastAPI HTTP entrypoint (`server.py`) for the Vite/React frontend in
+`codebase/FE`. `/api/v1/chat` runs `studypulse/`'s LangGraph pipeline
+(extraction → validation → confidence gate → SQLite/FAISS, RAG chat) — see
+`studypulse/graph.py`. Mail/Discord ingestion is triggered right after a
+connect (`studypulse/mail_ingest.py`, `studypulse/discord_ingest.py`) and its
+progress is exposed via `GET /api/v1/connections/ingest-status`.
 
-`studypulse/` (moved here unchanged) is a separate LangGraph pipeline with a
-mocked LLM/extraction step — a different, not-yet-real batch-ingestion
-design, kept for reference/future work. This agent is the interactive
-tool-calling path.
+Wired to the MCP integrations in `codebase/mcp/`: **Gmail** (`gmail_mcp`),
+**Discord** (`discord_mcp`), **Google Calendar** (`google_calendar_mcp`), and
+**Outlook** (`codebase/mcp/outlook_mcp`, via `mcp_bridge/outlook_client.py`).
 
-## How the 3 MCPs are reached
+## How the MCPs are reached
 
-- **Gmail**, **Discord**, and **Google Calendar**: all ship as local MCP servers (`gmail_mcp`, `discord_mcp`, `google_calendar_mcp`). Run each as its own process, and this agent connects to them over streamable-HTTP (`mcp_bridge/http_mcp_client.py`).
+- **Gmail**, **Discord**, **Google Calendar**: local MCP servers, reached over streamable-HTTP (`mcp_bridge/http_mcp_client.py`).
+- **Outlook**: `outlook-local-mcp`'s Docker container, reached via `mcp_bridge/outlook_client.py` (device-code sign-in — see `outlook_connection.py`).
 
 ## Setup
 
@@ -25,13 +26,13 @@ pip install -r requirements.txt
 test -f .env || cp .env.example .env
 ```
 
-Fill in `OPENAI_API_KEY` in `codebase/backend/.env`. Discord/Calendar/Gmail
-credentials go in `codebase/mcp/.env` (see `codebase/mcp/discord_mcp/README.md`,
-`codebase/mcp/google_calendar_mcp/README.md`, `codebase/mcp/gmail_mcp/README.md`
-for how to obtain each).
+Fill in `OPENAI_API_KEY` (all LLM calls, including studypulse/, go through
+OpenAI) and Google OAuth client credentials in `codebase/backend/.env`.
+Discord/Calendar/Gmail credentials go in `codebase/mcp/.env` (see
+`codebase/mcp/discord_mcp/README.md`, `codebase/mcp/google_calendar_mcp/README.md`,
+`codebase/mcp/gmail_mcp/README.md` for how to obtain each).
 
-In three other terminals (same `codebase/mcp/.venv`), start the servers this
-agent needs:
+In other terminals (same `codebase/mcp/.venv`), start the MCP servers:
 
 ```bash
 cd codebase/mcp && source .venv/bin/activate
@@ -48,16 +49,17 @@ cd codebase/mcp && source .venv/bin/activate
 python -m gmail_mcp              # http://localhost:8087/mcp
 ```
 
+Outlook runs as a Docker container instead — see `codebase/mcp/outlook_mcp/README.md`.
+
 ## Run
 
 ```bash
 cd codebase/backend
-python chat.py --provider openai --version v0
+uvicorn server:app --reload --port 8000
 ```
 
-Type a request; each turn is logged to `transcripts/<version>_<provider>_<timestamp>.transcript.json`
-with every tool call/result. `/exit` to stop.
+The FE (`codebase/FE`) talks to this at `http://localhost:8000/api/v1` by
+default (`VITE_API_BASE_URL`).
 
 Tools with no server/credentials configured yet fail closed with a plain
-`{"tool": ..., "error": ..., "message": ...}` dict instead of crashing the
-loop, so you can develop against a partially-configured environment.
+`{"tool": ..., "error": ..., "message": ...}` dict instead of crashing.

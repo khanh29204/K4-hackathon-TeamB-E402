@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
-import yaml
-
 from .clarify.tool import ask_user
 from .current_time.tool import get_current_time
 from .format.tool import render_digest
@@ -21,8 +16,6 @@ from .outlook_mail_search.tool import outlook_mail_search
 from .outlook_mail_read.tool import outlook_mail_read
 from .outlook_calendar_list_events.tool import outlook_calendar_list_events
 
-# Tool names here MUST stay in sync with artifacts/tools.yaml. If a tool is
-# renamed, update both this dict and the matching entry in tools.yaml.
 TOOL_FUNCTIONS = {
     "clarify": ask_user,
     "current_time": get_current_time,
@@ -40,21 +33,3 @@ TOOL_FUNCTIONS = {
     "outlook_mail_read": outlook_mail_read,
     "outlook_calendar_list_events": outlook_calendar_list_events,
 }
-
-
-def load_tool_declarations(path: Path) -> list[dict[str, Any]]:
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))["tools"]
-
-
-def to_openai_tools(declarations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": item["name"],
-                "description": item.get("description", ""),
-                "parameters": item.get("parameters", {"type": "object", "properties": {}}),
-            },
-        }
-        for item in declarations
-    ]

@@ -6,6 +6,12 @@ export async function getConnections() {
   return apiGet(CONNECTIONS_KEY);
 }
 
+// Progress of the background mail/Discord sync a connect triggers (see
+// backend studypulse/ingest_status.py) — e.g. { gmail: { status: "running" } }.
+export async function getIngestStatus() {
+  return apiGet(`${CONNECTIONS_KEY}/ingest-status`);
+}
+
 export async function getGoogleAuthUrl() {
   const data = await apiGet("/connections/google/start");
   return data.auth_url;

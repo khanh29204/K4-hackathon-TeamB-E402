@@ -17,7 +17,7 @@ What this module owns:
     per-server "Hủy kết nối" button does something real
 
 leave_guild/list_my_guilds are deliberately NOT registered in
-tools.yaml/TOOL_FUNCTIONS — they're called directly here, never exposed to
+TOOL_FUNCTIONS — they're called directly here, never exposed to
 the chat agent.
 """
 

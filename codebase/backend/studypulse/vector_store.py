@@ -76,10 +76,30 @@ class VectorStoreManager:
             )
             self._initialized = True
             logger.info("FAISS vector store initialized successfully.")
+            self._bootstrap_from_sqlite()
             return True
         except Exception as e:
             logger.warning(f"FAISS init failed (falling back to static docs): {e}")
             return False
+
+    def _bootstrap_from_sqlite(self) -> None:
+        """FAISS is in-memory and per-process — nothing indexes it on
+        startup, so anything saved to SQLite by an earlier process (a prior
+        run before a restart, ingestion done out-of-band, hitl.approve()
+        from a different request) is durable but permanently unsearchable by
+        rag_chatbot_node until re-ingested in the current process's
+        lifetime. Runs once, right after the store itself is created, so a
+        fresh process starts already caught up with whatever's confirmed in
+        SQLite rather than only what it happens to ingest itself."""
+        try:
+            from .storage import get_db
+
+            items = get_db().get_all_timeline()
+            if items:
+                self.index_timeline_items(items)
+                logger.info(f"Bootstrapped FAISS with {len(items)} existing timeline item(s) from SQLite.")
+        except Exception as e:
+            logger.warning(f"FAISS bootstrap from SQLite failed (index stays seed-only): {e}")
 
     def add_documents(
         self,

@@ -1,7 +1,7 @@
 import { Icon } from "../common/Icon.jsx";
 import { REVOCABLE_PLATFORM_IDS } from "../../constants/chat.js";
 
-export function Connections({ platforms, onToggle, onDisconnectGuild, outlookConnecting }) {
+export function Connections({ platforms, onToggle, onDisconnectGuild, outlookConnecting, ingestStatus = {} }) {
   return (
     <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-panel">
       <div className="flex items-start justify-between gap-3">
@@ -27,6 +27,7 @@ export function Connections({ platforms, onToggle, onDisconnectGuild, outlookCon
                     : "Quản lý"
                 : "Kết nối";
           const isDanger = platform.connected && !isDiscord && REVOCABLE_PLATFORM_IDS.has(platform.id);
+          const isSyncing = ingestStatus[platform.id]?.status === "running";
           return (
             <div key={platform.id} className="py-4">
               <div className="flex items-center gap-3">
@@ -54,6 +55,15 @@ export function Connections({ platforms, onToggle, onDisconnectGuild, outlookCon
                   {buttonLabel}
                 </button>
               </div>
+              {isSyncing ? (
+                <div className="ml-14 mt-2">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-600">
+                    <Icon className="animate-spin text-sm">progress_activity</Icon>
+                    Đang tải dữ liệu mới…
+                  </div>
+                  <div className="mt-1.5 h-1.5 w-full animate-pulse rounded-full bg-blue-200" />
+                </div>
+              ) : null}
               {isDiscord && platform.guilds?.length ? (
                 <ul className="ml-14 mt-2 space-y-1.5">
                   {platform.guilds.map((guild) => (

@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Icon } from "../common/Icon.jsx";
 
 export function EventCard({ event, onCalendar, onEdit, onFlag, isBusy }) {
+  const [showSource, setShowSource] = useState(false);
   const urgent = event.priority === "Khẩn cấp";
   const review = !event.verified;
 
@@ -26,12 +28,32 @@ export function EventCard({ event, onCalendar, onEdit, onFlag, isBusy }) {
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-600">
             <span className="flex items-center gap-1.5 font-bold text-slate-700"><Icon className="text-base">schedule</Icon>{event.date} · {event.time}</span>
-            <span className="flex items-center gap-1.5"><Icon className="text-base">{event.sourceIcon}</Icon>{event.source}</span>
+            {event.source_url ? (
+              <a
+                href={event.source_url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 text-blue-600 hover:underline"
+              >
+                <Icon className="text-base">{event.sourceIcon}</Icon>{event.source}
+              </a>
+            ) : (
+              <span className="flex items-center gap-1.5"><Icon className="text-base">{event.sourceIcon}</Icon>{event.source}</span>
+            )}
             <span className={`flex items-center gap-1.5 ${review ? "text-amber-700" : "text-emerald-700"}`}>
               <Icon className="text-base">{review ? "warning" : "verified"}</Icon>{event.confidence}% tin cậy
             </span>
           </div>
           <p className="mt-3 text-xs leading-5 text-slate-500">{event.detail}</p>
+          {event.raw_snippet ? (
+            <button onClick={() => setShowSource(!showSource)} className="mt-2 flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline">
+              <Icon className="text-sm">{showSource ? "expand_less" : "expand_more"}</Icon>
+              {showSource ? "Ẩn nguồn gốc" : event.action || "Xem nguồn gốc"}
+            </button>
+          ) : null}
+          {showSource && event.raw_snippet ? (
+            <p className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-500">{event.raw_snippet}</p>
+          ) : null}
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
             <span className="hidden flex-1 sm:block" />
             <button onClick={() => onEdit(event)} className="rounded-lg px-2 py-1 text-xs font-bold text-slate-500 transition-colors hover:bg-slate-100">
