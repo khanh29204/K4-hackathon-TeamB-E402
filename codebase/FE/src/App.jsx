@@ -27,9 +27,41 @@ import { Dashboard } from "./components/dashboard/Dashboard.jsx";
 import { EditDialog } from "./components/dashboard/EditDialog.jsx";
 import { OutlookDeviceCodeDialog } from "./components/dashboard/OutlookDeviceCodeDialog.jsx";
 
+const SESSIONS_KEY = "studypulse_chat_sessions";
+const GOOGLE_USER_CACHE_KEY = "studypulse_google_user";
+
 export default function App() {
-  const [conversationId] = useState(() => generateUUID());
-  const [messages, setMessages] = useState(initialMessages);
+  const [sessions, setSessions] = useState(() => {
+    try {
+      const stored = localStorage.getItem(SESSIONS_KEY);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [conversationId, setConversationId] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlC = params.get("c");
+    if (urlC) return urlC;
+    try {
+      const stored = localStorage.getItem(SESSIONS_KEY);
+      const parsed = stored ? JSON.parse(stored) : [];
+      if (parsed.length > 0) return parsed[0].id;
+    } catch {}
+    return generateUUID();
+  });
+
+  const [messages, setMessages] = useState(() => {
+    try {
+      const stored = localStorage.getItem(SESSIONS_KEY);
+      const parsed = stored ? JSON.parse(stored) : [];
+      const match = parsed.find((s) => s.id === conversationId);
+      if (match && match.messages?.length) return match.messages;
+    } catch {}
+    return initialMessages;
+  });
+
   const [platforms, setPlatforms] = useState(initialPlatforms);
   const [activeAction, setActiveAction] = useState("week");
   const [showConnections, setShowConnections] = useState(false);
@@ -40,7 +72,104 @@ export default function App() {
   const [busyItemId, setBusyItemId] = useState(null);
   const [outlookConnecting, setOutlookConnecting] = useState(false);
   const [outlookDeviceCode, setOutlookDeviceCode] = useState(null);
-  const [googleUser, setGoogleUser] = useState({ connected: false, email: null });
+  const [googleUser, setGoogleUser] = useState(() => {
+    try {
+      const cached = localStorage.getItem(GOOGLE_USER_CACHE_KEY);
+      return cached ? JSON.parse(cached) : { connected: false, email: null };
+    } catch {
+      return { connected: false, email: null };
+    }
+  });
+
+  // Keep URL search param ?c=<conversationId> in sync
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("c") !== conversationId) {
+      params.set("c", conversationId);
+      const newUrl = `${window.location.pathname}?${params.toString()}`;
+      window.history.replaceState({}, "", newUrl);
+    }
+  }, [conversationId]);
+
+  // Sync messages & session title back to localStorage
+  useEffect(() => {
+    if (!conversationId) return;
+    setSessions((prevSessions) => {
+      const firstUserMsg = messages.find((m) => m.role === "user");
+      const title = firstUserMsg ? (firstUserMsg.text.length > 30 ? firstUserMsg.text.slice(0, 30) + "..." : firstUserMsg.text) : "Cuộc hội thoại mới";
+      const now = new Date().toISOString();
+
+      const existingIndex = prevSessions.findIndex((s) => s.id === conversationId);
+      let updated;
+      if (existingIndex >= 0) {
+        updated = prevSessions.map((s) => (s.id === conversationId ? { ...s, title: firstUserMsg ? title : s.title, updatedAt: now, messages } : s));
+      } else {
+        updated = [{ id: conversationId, title, updatedAt: now, messages }, ...prevSessions];
+      }
+      try {
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, [conversationId, messages]);
+
+  // Listen to popstate (browser back/forward button)
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const urlC = params.get("c");
+      if (urlC && urlC !== conversationId) {
+        setConversationId(urlC);
+        try {
+          const stored = localStorage.getItem(SESSIONS_KEY);
+          const parsed = stored ? JSON.parse(stored) : [];
+          const match = parsed.find((s) => s.id === urlC);
+          setMessages(match?.messages || initialMessages);
+        } catch {
+          setMessages(initialMessages);
+        }
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [conversationId]);
+
+  const switchConversation = (targetId) => {
+    if (targetId === conversationId) return;
+    setConversationId(targetId);
+    const match = sessions.find((s) => s.id === targetId);
+    setMessages(match?.messages || initialMessages);
+
+    const params = new URLSearchParams(window.location.search);
+    params.set("c", targetId);
+    window.history.pushState({}, "", `${window.location.pathname}?${params.toString()}`);
+  };
+
+  const createNewConversation = () => {
+    const newId = generateUUID();
+    setConversationId(newId);
+    setMessages(initialMessages);
+
+    const params = new URLSearchParams(window.location.search);
+    params.set("c", newId);
+    window.history.pushState({}, "", `${window.location.pathname}?${params.toString()}`);
+  };
+
+  const deleteConversation = (targetId) => {
+    const updated = sessions.filter((s) => s.id !== targetId);
+    setSessions(updated);
+    try {
+      localStorage.setItem(SESSIONS_KEY, JSON.stringify(updated));
+    } catch {}
+
+    if (targetId === conversationId) {
+      if (updated.length > 0) {
+        switchConversation(updated[0].id);
+      } else {
+        createNewConversation();
+      }
+    }
+  };
 
   const {
     data: events = [],
@@ -59,7 +188,11 @@ export default function App() {
   const refreshConnections = async () => {
     try {
       const data = await getConnections();
-      setGoogleUser({ connected: data.google.connected, email: data.google.email });
+      const freshGoogle = { connected: data.google.connected, email: data.google.email };
+      setGoogleUser(freshGoogle);
+      try {
+        localStorage.setItem(GOOGLE_USER_CACHE_KEY, JSON.stringify(freshGoogle));
+      } catch {}
       setPlatforms((current) =>
         current.map((platform) => {
           if (platform.id === "gmail") return { ...platform, connected: data.google.connected };
@@ -416,6 +549,9 @@ export default function App() {
     try {
       await disconnectGoogle();
       setGoogleUser({ connected: false, email: null });
+      try {
+        localStorage.removeItem(GOOGLE_USER_CACHE_KEY);
+      } catch {}
       setPlatforms((current) => current.map((p) => (p.id === "gmail" ? { ...p, connected: false } : p)));
       notify("Đã đăng xuất Google", "info");
     } catch (err) {
@@ -433,12 +569,30 @@ export default function App() {
         onOpenConnections={() => { setShowConnections(true); setMobileView("dashboard"); }}
       />
       <div className="hidden min-h-0 flex-1 lg:flex">
-        <ChatPanel messages={messages} onSend={sendMessage} isSending={isSending} />
+        <ChatPanel
+          messages={messages}
+          onSend={sendMessage}
+          isSending={isSending}
+          sessions={sessions}
+          activeConversationId={conversationId}
+          onSelectSession={switchConversation}
+          onNewSession={createNewConversation}
+          onDeleteSession={deleteConversation}
+        />
         <Dashboard {...dashboardProps} />
       </div>
       <div className="min-h-0 flex-1 lg:hidden">
         {mobileView === "chat" ? (
-          <ChatPanel messages={messages} onSend={sendMessage} isSending={isSending} />
+          <ChatPanel
+            messages={messages}
+            onSend={sendMessage}
+            isSending={isSending}
+            sessions={sessions}
+            activeConversationId={conversationId}
+            onSelectSession={switchConversation}
+            onNewSession={createNewConversation}
+            onDeleteSession={deleteConversation}
+          />
         ) : (
           <Dashboard {...dashboardProps} />
         )}

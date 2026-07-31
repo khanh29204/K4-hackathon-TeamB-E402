@@ -5,87 +5,19 @@ export const quickActions = [
   { id: "week", label: "Deadline tuần", icon: "assignment", color: "text-orange-600 bg-orange-50" },
 ];
 
-export const initialEvents = [
-  {
-    id: 1,
-    type: "deadline",
-    title: "Nộp AI Spec — bản hoàn chỉnh",
-    course: "AI Product Hackathon",
-    date: "Hôm nay",
-    time: "23:59",
-    source: "Gmail",
-    sourceIcon: "mail",
-    priority: "Khẩn cấp",
-    confidence: 98,
-    detail: "Nộp spec.md theo template, quality bar được chốt sau thời điểm này.",
-    action: "Mở email gốc",
-    verified: true,
-  },
-  {
-    id: 2,
-    type: "class",
-    title: "Checkpoint 5 — Validation & dry run",
-    course: "AI Product Hackathon",
-    date: "Ngày mai",
-    time: "14:00",
-    source: "Discord",
-    sourceIcon: "forum",
-    priority: "Sắp tới",
-    confidence: 96,
-    detail: "Chuẩn bị prototype, validation log và phân công người demo.",
-    action: "Đi tới Discord",
-    verified: true,
-  },
-  {
-    id: 3,
-    type: "review",
-    title: "Lịch học bù sau kỳ nghỉ",
-    course: "Hệ điều hành",
-    date: "Chờ xác nhận",
-    time: "—",
-    source: "Discord",
-    sourceIcon: "forum",
-    priority: "Cần kiểm tra",
-    confidence: 72,
-    detail: "Tin nhắn dùng cụm “tuần sau Tết”, chưa có ngày cụ thể. AI không tự suy diễn.",
-    action: "Kiểm tra nguồn",
-    verified: false,
-  },
-  {
-    id: 4,
-    type: "class",
-    title: "Workshop: Prompt & Evals",
-    course: "AI Thực Chiến",
-    date: "02/08",
-    time: "09:00",
-    source: "Outlook",
-    sourceIcon: "calendar_month",
-    priority: "Bình thường",
-    confidence: 94,
-    detail: "Phòng B204 · Mang theo golden set và kết quả lượt chạy gần nhất.",
-    action: "Mở lịch gốc",
-    verified: true,
-  },
-];
+export const initialEvents = [];
 
 export const initialPlatforms = [
   { id: "gmail", name: "Gmail", icon: "mail", connected: false, scope: "Mail, Google Calendar" },
   { id: "outlook", name: "Outlook", icon: "alternate_email", connected: false, scope: "Mail, Calendar (chỉ đọc)" },
   { id: "discord", name: "Discord", icon: "forum", connected: false, scope: "Server BTC, Class K4", guilds: [] },
-  { id: "zalo", name: "Zalo", icon: "chat_bubble", connected: false, scope: "Mock — chưa hỗ trợ API" },
 ];
 
 export const initialMessages = [
   {
-    id: 1,
+    id: "welcome",
     role: "assistant",
-    text: "Chào Minh! Mình là StudyPulse. Mình có thể tổng hợp lịch và deadline từ Gmail, Outlook và Discord của bạn.",
-    time: "08:30",
-  },
-  {
-    id: 2,
-    role: "assistant",
-    text: "Hôm nay bạn có 1 deadline khẩn cấp lúc 23:59. Mình luôn đính kèm nguồn để bạn kiểm tra trước khi xác nhận.",
-    time: "08:30",
+    text: "Xin chào! Mình là trợ lý StudyPulse AI. Đăng nhập Google ở góc trên bên phải để bắt đầu quét email, tổng hợp lịch học và deadline nhé!",
+    time: "",
   },
 ];

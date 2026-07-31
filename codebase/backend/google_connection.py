@@ -125,17 +125,47 @@ def get_authorization_url() -> str:
     return auth_url
 
 
+_cached_email: str | None = None
+
+
 def exchange_code(code: str) -> None:
-    global _pending_flow
+    global _pending_flow, _cached_email
     flow = _pending_flow or _build_flow()
     flow.fetch_token(code=code)
     _pending_flow = None
-    _save(flow.credentials)
+    creds = flow.credentials
+    email = None
+    try:
+        response = httpx.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {creds.token}"},
+            timeout=5.0,
+        )
+        if response.status_code == 200:
+            email = response.json().get("email")
+            _cached_email = email
+    except Exception:
+        pass
+    _save_with_email(creds, email)
 
 
 def _save(creds: Credentials) -> None:
-    token_path().parent.mkdir(parents=True, exist_ok=True)
-    token_path().write_text(creds.to_json(), encoding="utf-8")
+    _save_with_email(creds, _cached_email)
+
+
+def _save_with_email(creds: Credentials, email: str | None = None) -> None:
+    global _cached_email
+    if email:
+        _cached_email = email
+    target = token_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(creds.to_json())
+        if email or _cached_email:
+            data["_cached_email"] = email or _cached_email
+        target.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        target.write_text(creds.to_json(), encoding="utf-8")
 
 
 def load_credentials() -> Credentials | None:
@@ -159,22 +189,43 @@ def load_credentials() -> Credentials | None:
 
 
 def disconnect() -> None:
+    global _cached_email
+    _cached_email = None
     token_path().unlink(missing_ok=True)
 
 
 def get_status() -> dict[str, Any]:
+    global _cached_email
     creds = load_credentials()
     if creds is None:
+        _cached_email = None
         return {"connected": False, "email": None, "scopes": []}
-    email = None
-    try:
-        response = httpx.get(
-            "https://www.googleapis.com/oauth2/v3/userinfo",
-            headers={"Authorization": f"Bearer {creds.token}"},
-            timeout=5.0,
-        )
-        if response.status_code == 200:
-            email = response.json().get("email")
-    except httpx.HTTPError:
-        pass
+
+    email = _cached_email
+    if not email:
+        try:
+            path = token_path()
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                email = data.get("_cached_email")
+                if email:
+                    _cached_email = email
+        except Exception:
+            pass
+
+    if not email:
+        try:
+            response = httpx.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {creds.token}"},
+                timeout=2.0,
+            )
+            if response.status_code == 200:
+                email = response.json().get("email")
+                if email:
+                    _cached_email = email
+                    _save_with_email(creds, email)
+        except Exception:
+            pass
+
     return {"connected": True, "email": email, "scopes": list(creds.scopes or [])}

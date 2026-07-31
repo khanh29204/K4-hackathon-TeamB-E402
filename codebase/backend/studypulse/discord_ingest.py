@@ -62,8 +62,12 @@ def _fetch_page(channel_id: str, before: str | None) -> list[dict[str, Any]]:
     args: dict[str, Any] = {"channel_id": channel_id, "count": str(_PAGE_SIZE), "output": "json"}
     if before:
         args["before"] = before
-    text = asyncio.run(call_tool_text(DISCORD_MCP_URL, "read_messages", args))
-    return json.loads(text)
+    try:
+        text = asyncio.run(call_tool_text(DISCORD_MCP_URL, "read_messages", args))
+        return json.loads(text)
+    except Exception as exc:
+        logger.warning("Failed to fetch page for Discord channel %s (%s)", channel_id, exc)
+        return []
 
 
 def fetch_channel_messages(
@@ -132,7 +136,12 @@ def _ingest_chunk(channel_id: str, chunk_index: int, chunk_text: str) -> dict[st
 def ingest_channel(channel_id: str, *, max_messages: int = DEFAULT_MAX_MESSAGES_PER_CHANNEL) -> dict[str, Any]:
     """Fetch -> chunk -> ingest for one channel. Returns counts, not raw
     state, matching mail_ingest.ingest_new_mail's shape."""
-    messages = fetch_channel_messages(channel_id, max_messages=max_messages)
+    try:
+        messages = fetch_channel_messages(channel_id, max_messages=max_messages)
+    except Exception as exc:
+        logger.warning("Skipping Discord channel %s due to access or fetch error: %s", channel_id, exc)
+        return {"channel_id": channel_id, "messages": 0, "chunks": 0, "ingested": 0, "errors": 1}
+
     chunks = chunk_messages(messages)
     ingested = 0
     errors = 0
@@ -156,8 +165,12 @@ def ingest_channel(channel_id: str, *, max_messages: int = DEFAULT_MAX_MESSAGES_
 
 
 def _list_text_channels(guild_id: str) -> list[dict[str, Any]]:
-    text = asyncio.run(call_tool_text(DISCORD_MCP_URL, "list_channels", {"guild_id": guild_id, "output": "json"}))
-    channels = json.loads(text)
+    try:
+        text = asyncio.run(call_tool_text(DISCORD_MCP_URL, "list_channels", {"guild_id": guild_id, "output": "json"}))
+        channels = json.loads(text)
+    except Exception as exc:
+        logger.warning("Failed to list text channels for Discord guild %s: %s", guild_id, exc)
+        return []
     denied = _denylisted_ids("DISCORD_INGEST_CHANNEL_DENYLIST")
     return [c for c in channels if c.get("type") in ("text", "news") and c.get("id") not in denied]
 
@@ -173,7 +186,12 @@ def ingest_guild(guild_id: str, **kwargs: Any) -> dict[str, Any]:
         return {"guild_id": guild_id, "channels": 0, "results": [], "skipped": "guild_denylisted"}
 
     channels = _list_text_channels(guild_id)
-    results = [ingest_channel(c["id"], **kwargs) for c in channels]
+    results = []
+    for c in channels:
+        try:
+            results.append(ingest_channel(c["id"], **kwargs))
+        except Exception as exc:
+            logger.warning("Skipping channel %s in guild %s due to error: %s", c.get("id"), guild_id, exc)
     return {"guild_id": guild_id, "channels": len(channels), "results": results}
 
 

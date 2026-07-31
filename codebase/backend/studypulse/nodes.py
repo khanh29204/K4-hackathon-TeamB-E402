@@ -507,10 +507,15 @@ def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
     language = state.get("language", "vi")
     intent = state.get("intent", "general")
     timeline = state.get("dashboard_timeline", [])
-    if not timeline:
+    if not timeline or any(kw in query.lower() for kw in ["email", "mail", "gmail", "outlook", "thư"]):
         try:
             from .storage import get_db
-            timeline = get_db().get_all_timeline()
+            db_items = get_db().get_all_timeline()
+            if not db_items:
+                from .mail_ingest import ingest_new_mail
+                ingest_new_mail("gmail", unread_only=False)
+                db_items = get_db().get_all_timeline()
+            timeline = db_items
         except Exception:
             timeline = []
     user_profile = dict(state.get("user_profile", {}))

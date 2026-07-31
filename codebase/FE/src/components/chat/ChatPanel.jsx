@@ -2,8 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../common/Icon.jsx";
 import { MessageBubble } from "./MessageBubble.jsx";
 
-export function ChatPanel({ messages, onSend, isSending }) {
+export function ChatPanel({
+  messages,
+  onSend,
+  isSending,
+  sessions = [],
+  activeConversationId,
+  onSelectSession,
+  onNewSession,
+  onDeleteSession,
+}) {
   const [value, setValue] = useState("");
+  const [showHistoryMenu, setShowHistoryMenu] = useState(false);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -22,19 +32,96 @@ export function ChatPanel({ messages, onSend, isSending }) {
     setValue("");
   };
 
+  const activeSession = sessions.find((s) => s.id === activeConversationId);
+
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-white lg:max-w-[40%] lg:border-r lg:border-slate-200/80" aria-label="Trò chuyện với StudyPulse">
-      <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+    <section className="relative flex min-h-0 flex-1 flex-col bg-white lg:max-w-[40%] lg:border-r lg:border-slate-200/80" aria-label="Trò chuyện với StudyPulse">
+      <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
         <div>
-          <h2 className="font-extrabold text-ink">Trợ lý của bạn</h2>
+          <h2 className="font-extrabold text-ink truncate max-w-[180px]">
+            {activeSession?.title || "Trợ lý của bạn"}
+          </h2>
           <div className="mt-0.5 flex items-center gap-1.5 text-xs text-emerald-700">
             <span className="size-2 rounded-full bg-emerald-500" />
             Sẵn sàng hỗ trợ
           </div>
         </div>
-        <button className="grid size-9 place-items-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Tùy chọn trò chuyện">
-          <Icon>more_horiz</Icon>
-        </button>
+
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={onNewSession}
+            className="flex items-center gap-1 rounded-xl bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-600 transition-colors hover:bg-blue-100"
+            title="Tạo cuộc hội thoại mới"
+          >
+            <Icon className="text-base">add</Icon>
+            <span className="hidden sm:inline">Mới</span>
+          </button>
+
+          <div className="relative">
+            <button
+              onClick={() => setShowHistoryMenu(!showHistoryMenu)}
+              className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition-colors ${
+                showHistoryMenu ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+              title="Xem lịch sử trò chuyện"
+            >
+              <Icon className="text-base">history</Icon>
+              <span>Lịch sử</span>
+            </button>
+
+            {showHistoryMenu && (
+              <div className="absolute right-0 top-full z-50 mt-2 w-72 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl animate-in fade-in zoom-in-95">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
+                  <span className="text-xs font-extrabold text-ink">Lịch sử cuộc hội thoại</span>
+                  <button
+                    onClick={onNewSession}
+                    className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-0.5"
+                  >
+                    <Icon className="text-sm">add</Icon> Mới
+                  </button>
+                </div>
+                <div className="max-h-64 overflow-y-auto space-y-1 py-1.5">
+                  {sessions.length === 0 ? (
+                    <p className="px-3 py-4 text-center text-xs text-slate-400">Chưa có lịch sử hội thoại</p>
+                  ) : (
+                    sessions.map((session) => {
+                      const isActive = session.id === activeConversationId;
+                      return (
+                        <div
+                          key={session.id}
+                          className={`group flex items-center justify-between rounded-xl px-3 py-2 text-xs transition-colors cursor-pointer ${
+                            isActive ? "bg-blue-50 text-blue-700 font-bold" : "text-slate-700 hover:bg-slate-50"
+                          }`}
+                          onClick={() => {
+                            onSelectSession(session.id);
+                            setShowHistoryMenu(false);
+                          }}
+                        >
+                          <div className="flex-1 truncate pr-2">
+                            <p className="truncate">{session.title || "Cuộc hội thoại mới"}</p>
+                            <p className="text-[10px] text-slate-400">{session.updatedAt ? new Date(session.updatedAt).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }) : ""}</p>
+                          </div>
+                          {sessions.length > 1 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDeleteSession(session.id);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 rounded transition-opacity"
+                              title="Xóa cuộc hội thoại"
+                            >
+                              <Icon className="text-sm">delete</Icon>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="chat-scroll flex-1 space-y-5 overflow-y-auto px-5 py-6" aria-live="polite">
@@ -51,7 +138,12 @@ export function ChatPanel({ messages, onSend, isSending }) {
         <div ref={messagesEndRef} aria-hidden="true" />
       </div>
 
-      <form onSubmit={submit} className="border-t border-slate-100 bg-white p-4">
+      <form onSubmit={submit} className="relative border-t border-slate-100 bg-white p-4">
+        {isSending && (
+          <div className="absolute top-0 left-0 right-0 h-0.5 overflow-hidden bg-blue-100">
+            <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 w-1/3 progress-line-shimmer" />
+          </div>
+        )}
         <div className="flex items-end gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 transition-colors focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-50">
           <button type="button" className="grid size-10 shrink-0 place-items-center rounded-xl text-slate-400 hover:bg-white" aria-label="Đính kèm">
             <Icon>attach_file</Icon>

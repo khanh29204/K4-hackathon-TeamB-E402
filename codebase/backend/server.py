@@ -430,3 +430,8 @@ def disconnect_outlook_connection() -> dict[str, Any]:
     except Exception as exc:
         raise error_response(502, "OUTLOOK_DISCONNECT_FAILED", str(exc)) from exc
     return envelope(data={"connected": False})
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

@@ -23,14 +23,25 @@ export function MessageBubble({ message, onRetry }) {
                 ? "rounded-tl-sm bg-red-50 text-red-700"
                 : isClarification
                   ? "rounded-tl-sm bg-amber-50 text-amber-800"
-                  : "rounded-tl-sm bg-slate-100 text-slate-700"
+                  : message.loading
+                    ? "rounded-tl-sm bg-white border border-blue-200 thinking-glow text-slate-700 shadow-sm"
+                    : "rounded-tl-sm bg-slate-100 text-slate-700"
           }`}
         >
           {message.loading ? (
-            <span className="flex items-center gap-2">
-              <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-slate-300 border-t-slate-500" aria-hidden="true" />
-              StudyPulse đang xử lý…
-            </span>
+            <div className="flex flex-col gap-2 min-w-[200px]">
+              <div className="flex items-center gap-2 text-xs font-bold text-blue-600">
+                <span className="flex gap-1 items-center">
+                  <span className="size-1.5 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="size-1.5 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <span className="size-1.5 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: "300ms" }} />
+                </span>
+                <span>{message.statusText || "StudyPulse đang phân tích dữ liệu..."}</span>
+              </div>
+              <div className="h-1 w-full bg-blue-100/70 rounded-full overflow-hidden relative">
+                <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 w-2/3 rounded-full progress-line-shimmer" />
+              </div>
+            </div>
           ) : isUser ? (
             message.text
           ) : (
