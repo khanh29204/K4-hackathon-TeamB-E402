@@ -43,7 +43,7 @@ export function ChatPanel({ messages, onSend, isSending }) {
             <Icon className="text-lg">verified_user</Icon>
             Phạm vi hỗ trợ
           </div>
-          <p className="text-sm leading-6 text-slate-600">Mình tổng hợp lịch, deadline và link học. Mình không nộp bài hoặc trả lời tin nhắn thay bạn.</p>
+          <p className="text-sm leading-6 text-slate-600">Mình tổng hợp lịch, deadline, tài liệu môn học, slide bài giảng, và quét/tóm tắt email, Discord học tập giúp bạn. Mình không nộp bài hoặc trả lời tin nhắn thay bạn.</p>
         </div>
         {messages.map((message) => (
           <MessageBubble key={message.id} message={message} onRetry={onSend} />
@@ -65,7 +65,7 @@ export function ChatPanel({ messages, onSend, isSending }) {
               if (event.key === "Enter" && !event.shiftKey) submit(event);
             }}
             rows="1"
-            placeholder="Hỏi về lịch hoặc deadline..."
+            placeholder="Hỏi về lịch, deadline, tài liệu môn học..."
             className="max-h-28 min-h-10 flex-1 resize-none bg-transparent py-2 text-sm text-ink outline-none placeholder:text-slate-400"
           />
           <button

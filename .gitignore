@@ -10,3 +10,6 @@ __pycache__/
 codebase/backend/credentials/*.json
 codebase/backend/transcripts/*.json
 .run/
+codebase/backend/*.sqlite
+codebase/backend/*.sqlite-shm
+codebase/backend/*.sqlite-wal

@@ -1,8 +1,7 @@
 """Tools the RAG chatbot LLM can call mid-conversation, instead of always
 being handed one fixed FAISS similarity_search(k=3) + the last 10 timeline
 items regardless of what was actually asked (the old rag_chatbot_node
-shape). Two tools, covering the two ways a question narrows down "which
-timeline items":
+shape).
 
 - search_timeline: semantic/topical — "anything about the AI hackathon",
   "important stuff" — embedding similarity over title+description+category.
@@ -11,10 +10,33 @@ timeline items":
   handles poorly since platform/category/priority aren't semantic content,
   they're metadata. This is exactly the shape "trong gmail thì sao?" (a
   follow-up narrowing an earlier answer to one platform) needs.
+- list_calendar_events: a DIFFERENT data source entirely — the student's
+  actual Google/Outlook Calendar, reached via the same TOOL_FUNCTIONS
+  tools/calendar_create_event.py's confirm_calendar endpoint writes into,
+  not studypulse's SQLite/FAISS. search_timeline/query_timeline only ever
+  see items extracted from ingested mail/Discord; a real calendar event
+  (e.g. one the student created themselves, or one already confirmed onto
+  the calendar) never lands in timeline_items, so "do I have any meetings
+  today" needs this tool or it always comes back empty.
+- gmail_search/gmail_read_thread, outlook_mail_search/outlook_mail_read,
+  discord_find_channel/discord_read_messages/discord_list_guilds/
+  discord_server_info/discord_list_channels: LIVE lookups against the
+  mailbox/Discord server itself, via the same TOOL_FUNCTIONS the pre-
+  langgraph chat.py agent used (see tools/__init__.py) — not studypulse's
+  SQLite/FAISS. Closes a known, explicitly-documented gap from that
+  migration (see server.py's /api/v1/chat docstring): search_timeline/
+  query_timeline only ever see what a background ingestion pass already
+  extracted as a deadline/exam/etc — mail outside the ingestion lookback
+  window, a specific message the student wants read in full, or Discord
+  history in a channel/guild that was never (or not yet) ingested are all
+  invisible to those two tools and need a live call instead. Read-only —
+  no write/create tool (e.g. calendar_create_event) is wired in here yet;
+  see execute_rag_tool's docstring for why.
 
-Both return the same compact item shape so the calling node can accumulate
-sources_cited/timeline_items_referenced identically regardless of which
-tool produced a given item.
+search_timeline/query_timeline return the same compact item shape so the
+calling node can accumulate sources_cited/timeline_items_referenced
+identically regardless of which one produced a given item; none of the
+other tools above participate in that (see execute_rag_tool).
 """
 
 from __future__ import annotations
@@ -73,6 +95,174 @@ RAG_TOOL_DECLARATIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_events",
+            "description": (
+                "List events actually on the student's Google or Outlook Calendar in a time "
+                "range — for questions about meetings, classes, or 'what's on my calendar', as "
+                "opposed to deadlines/announcements extracted from mail/Discord (use "
+                "search_timeline/query_timeline for those). Always pass time_min/time_max for "
+                "date-scoped questions like 'hôm nay' (today) or 'tuần này' (this week) — "
+                "resolve the actual date yourself from today's date (given in the system "
+                "prompt) before calling; this tool does not interpret relative dates."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "platform": {"type": "string", "enum": ["google", "outlook"], "description": "Which calendar to check."},
+                    "time_min": {"type": "string", "description": "ISO 8601 start of range, e.g. 2026-07-31T00:00:00+07:00."},
+                    "time_max": {"type": "string", "description": "ISO 8601 end of range, e.g. 2026-07-31T23:59:59+07:00."},
+                    "query": {"type": "string", "description": "Optional text filter."},
+                },
+                "required": ["platform"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_search",
+            "description": (
+                "LIVE search of the student's actual Gmail (not the ingested/extracted "
+                "timeline) using Gmail search syntax, e.g. 'is:unread newer_than:7d', "
+                "'from:...'. Use for mail outside what's already been ingested, or when the "
+                "student wants to search their inbox directly rather than ask about known "
+                "deadlines. Returns thread_id values for gmail_read_thread."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Gmail search syntax."},
+                    "max_results": {"type": "integer", "default": 10},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_read_thread",
+            "description": "Read the full content of one Gmail thread found via gmail_search.",
+            "parameters": {
+                "type": "object",
+                "properties": {"thread_id": {"type": "string"}},
+                "required": ["thread_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "outlook_mail_search",
+            "description": (
+                "LIVE search of the student's actual Outlook mail (not the ingested/extracted "
+                "timeline) using KQL (e.g. 'subject:\"deadline\"', 'from:...'), or lists recent "
+                "messages across all folders if query is empty."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 10},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "outlook_mail_read",
+            "description": "Read the full content of one Outlook message by message_id, from outlook_mail_search.",
+            "parameters": {
+                "type": "object",
+                "properties": {"message_id": {"type": "string"}},
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_list_guilds",
+            "description": (
+                "List every Discord server (guild) the bot has been invited into and can "
+                "currently see. Call this first if the student asks about 'the Discord server' "
+                "or a server by name and you don't already know its guild_id, or there's more "
+                "than one and you need to disambiguate."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_server_info",
+            "description": (
+                "Details (name, member count, channel count, owner, created date) of a Discord "
+                "server the bot has been invited into. Leave guild_id empty if the bot is only "
+                "in one server; otherwise call discord_list_guilds first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"guild_id": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_list_channels",
+            "description": (
+                "List every channel in a Discord server, grouped by category. Use when the "
+                "student asks broadly about a SERVER ('có gì mới trên X') rather than naming one "
+                "specific channel — pick the relevant channel(s) from this list, then call "
+                "discord_read_messages on each, instead of guessing a channel name for "
+                "discord_find_channel."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"guild_id": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_find_channel",
+            "description": "Find a Discord channel's ID by (partial) name. Needed before discord_read_messages, unless discord_list_channels already gave you the id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "guild_id": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_read_messages",
+            "description": (
+                "LIVE read of recent message history from a Discord channel (not the ingested/"
+                "extracted timeline) — use for content in a channel/guild that hasn't been "
+                "ingested yet, or when the student wants to see actual recent chat rather than "
+                "an extracted deadline. Get channel_id from discord_find_channel or "
+                "discord_list_channels first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "count": {"type": "integer", "default": 50},
+                },
+                "required": ["channel_id"],
+            },
+        },
+    },
 ]
 
 
@@ -119,12 +309,59 @@ def _compact(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+# Tools that map straight onto an existing TOOL_FUNCTIONS entry of the same
+# name, with no ExtractedItem/timeline shape to reconcile — their result is
+# just handed back to the LLM as-is (see execute_rag_tool). Deliberately
+# read-only: calendar_create_event (also in TOOL_FUNCTIONS) is NOT here —
+# it writes a real calendar event, and its own docstring requires
+# confirmed=True only after the user has explicitly confirmed via a
+# clarify/response_type=yes_no round-trip. rag_chatbot_node's tool loop has
+# no pause/resume (interrupt) mechanism the way hitl_escalation does for
+# ingestion, so it can't currently honor that confirm step — wiring the
+# write tool in without it would let one ambiguous chat message create a
+# real event on the student's calendar with no confirmation UI in between.
+_PASSTHROUGH_TOOLS = {
+    "gmail_search",
+    "gmail_read_thread",
+    "outlook_mail_search",
+    "outlook_mail_read",
+    "discord_find_channel",
+    "discord_read_messages",
+    "discord_list_guilds",
+    "discord_server_info",
+    "discord_list_channels",
+}
+
+
 def execute_rag_tool(name: str, args: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     """Run one tool call. Returns (text to feed back to the LLM, raw items
     for the caller's citation bookkeeping). Never raises — a broken tool
     call becomes an error string the LLM sees and can react to, same as the
     old chat.py agent loop's execute_tool_call."""
     try:
+        if name == "list_calendar_events":
+            from tools import TOOL_FUNCTIONS
+
+            platform = args.get("platform", "google")
+            func = TOOL_FUNCTIONS["calendar_list_events" if platform == "google" else "outlook_calendar_list_events"]
+            kwargs: dict[str, Any] = {}
+            if args.get("time_min"):
+                kwargs["time_min"] = args["time_min"]
+            if args.get("time_max"):
+                kwargs["time_max"] = args["time_max"]
+            if args.get("query"):
+                kwargs["query"] = args["query"]
+            result = func(**kwargs)
+            # Not a timeline_items citation — a real calendar event has no
+            # ExtractedItem id/source_platform to dedupe/cite by that shape,
+            # so this bypasses _compact/items_to_citations entirely and just
+            # hands the tool's own text back to the LLM.
+            return json.dumps(result, ensure_ascii=False, default=str), []
+        if name in _PASSTHROUGH_TOOLS:
+            from tools import TOOL_FUNCTIONS
+
+            result = TOOL_FUNCTIONS[name](**args)
+            return json.dumps(result, ensure_ascii=False, default=str), []
         if name == "search_timeline":
             from .vector_store import get_vector_store
 

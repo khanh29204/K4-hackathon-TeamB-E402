@@ -18,6 +18,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .state import (
     StudyPulseState,
@@ -517,9 +518,11 @@ def rag_chatbot_node(state: StudyPulseState) -> StudyPulseState:
     provider = make_provider("openai")
     model_name = provider.default_model
 
+    today_vn = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d (%A)")
+
     # 2. Short-Term Memory: previous chat history, as plain OpenAI-style messages
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": get_base_persona() + "\n" + get_rag_agent_tool_guidance()},
+        {"role": "system", "content": get_base_persona() + "\n" + get_rag_agent_tool_guidance(today=today_vn)},
     ]
     for msg in chat_history:
         role = "user" if msg.get("role") == "user" else "assistant"
