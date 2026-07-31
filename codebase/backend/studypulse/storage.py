@@ -111,7 +111,8 @@ class StudyPulseDB:
                 ("meeting_link", "TEXT DEFAULT NULL"),
                 ("naming_convention", "TEXT DEFAULT NULL"),
                 ("required_materials", "TEXT DEFAULT NULL"),
-                ("alert_sent", "INTEGER DEFAULT 0")
+                ("alert_sent", "INTEGER DEFAULT 0"),
+                ("user_id", "TEXT DEFAULT 'default_user'"),
             ]:
                 try:
                     self._conn.execute(f"ALTER TABLE timeline_items ADD COLUMN {col} {col_type};")
@@ -132,15 +133,17 @@ class StudyPulseDB:
 
     # ── TIMELINE OPERATIONS ──
 
-    def save_timeline_item(self, item: Dict[str, Any]) -> bool:
+    def save_timeline_item(self, item: Dict[str, Any], user_id: Optional[str] = None) -> bool:
         """
         Persist a timeline item to SQLite.
-        Uses INSERT OR REPLACE to handle updates.
+        Uses INSERT OR REPLACE to handle updates. Supports multi-tenant user_id.
         """
         if not self._ensure_conn():
             return False
 
         try:
+            uid = user_id or item.get("user_id") or "default_user"
+            item["user_id"] = uid
             alert_sent = item.get("alert_sent", 0)
             if not alert_sent:
                 try:
@@ -156,9 +159,9 @@ class StudyPulseDB:
                    (id, category, title, description, due_date, due_time, 
                     priority, confidence_score, source_platform, source_message_id,
                     language_detected, conflict_detected, requires_clarification,
-                    meeting_link, naming_convention, required_materials, alert_sent,
+                    meeting_link, naming_convention, required_materials, alert_sent, user_id,
                     created_at, raw_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item.get("id", ""),
                     item.get("category", "other"),
@@ -177,34 +180,41 @@ class StudyPulseDB:
                     item.get("naming_convention"),
                     item.get("required_materials"),
                     alert_sent,
+                    uid,
                     item.get("timestamp", datetime.utcnow().isoformat()),
                     json.dumps(item, ensure_ascii=False, default=str),
                 ),
             )
             self._conn.commit()
-            logger.info(f"Saved timeline item: {item.get('title', 'N/A')}")
+            logger.info(f"Saved timeline item for user {uid}: {item.get('title', 'N/A')}")
             return True
         except Exception as e:
             logger.error(f"Failed to save timeline item: {e}")
             return False
 
-    def save_timeline_items(self, items: List[Dict[str, Any]]) -> int:
+    def save_timeline_items(self, items: List[Dict[str, Any]], user_id: Optional[str] = None) -> int:
         """Batch save timeline items. Returns count of successfully saved items."""
         saved = 0
         for item in items:
-            if self.save_timeline_item(item):
+            if self.save_timeline_item(item, user_id=user_id):
                 saved += 1
         return saved
 
-    def get_all_timeline(self) -> List[Dict[str, Any]]:
-        """Retrieve all timeline items from SQLite."""
+    def get_all_timeline(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve all timeline items from SQLite, filtered by user_id if provided."""
         if not self._ensure_conn():
             return []
 
         try:
-            cursor = self._conn.execute(
-                "SELECT raw_json FROM timeline_items ORDER BY due_date ASC"
-            )
+            if user_id:
+                cursor = self._conn.execute(
+                    "SELECT raw_json FROM timeline_items WHERE user_id = ? OR user_id = 'default_user' ORDER BY due_date ASC",
+                    (user_id,)
+                )
+            else:
+                cursor = self._conn.execute(
+                    "SELECT raw_json FROM timeline_items ORDER BY due_date ASC"
+                )
             return [json.loads(row[0]) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Failed to read timeline items: {e}")

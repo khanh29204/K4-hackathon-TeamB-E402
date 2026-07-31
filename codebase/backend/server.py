@@ -232,12 +232,13 @@ def chat(request: ChatRequest) -> dict[str, Any]:
 
 @app.get("/api/v1/timeline")
 def get_timeline() -> dict[str, Any]:
-    """Reads studypulse's SQLite (studypulse/storage.py), not the old
-    in-memory timeline_store — that store had nothing writing to it once
-    /api/v1/chat stopped producing tool_events; mail lands here instead via
-    studypulse/mail_ingest.py. See timeline_view.to_card for the shape
-    adapter (studypulse's ExtractedItem shape -> the FE's EventCard shape)."""
-    items = [to_card(item) for item in get_db().get_all_timeline()]
+    """Reads studypulse's SQLite (studypulse/storage.py), filtered by user_id for multi-tenant support."""
+    try:
+        google_status = google_connection.get_status()
+        user_email = google_status.get("email")
+    except Exception:
+        user_email = None
+    items = [to_card(item) for item in get_db().get_all_timeline(user_id=user_email)]
     return envelope(data={"items": items, "total": len(items)})
 
 

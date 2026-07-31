@@ -67,7 +67,12 @@ def client_secrets_path() -> Path:
     return target
 
 
-def token_path() -> Path:
+def token_path(user_email: str | None = None) -> Path:
+    if user_email:
+        safe_name = re.sub(r"[^\w\.-]", "_", user_email)
+        user_target = _CREDENTIALS_DIR / "tokens" / f"{safe_name}.json"
+        if user_target.exists():
+            return user_target
     default_target = _CREDENTIALS_DIR / "token.json"
     env_path = os.environ.get("GOOGLE_CALENDAR_TOKEN_FILE")
     if env_path:

@@ -191,11 +191,12 @@ def _fetch_full_body(message: dict[str, Any], source: str) -> str:
 # INGEST — run survivors through the studypulse ingestion flow
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _ingest_one(message: dict[str, Any], source: str) -> dict[str, Any]:
+def _ingest_one(message: dict[str, Any], source: str, user_id: str | None = None) -> dict[str, Any]:
     """One message through the compiled graph's ingestion flow (extraction
     -> validation -> confidence gate -> SQLite/FAISS, or HITL if
     low-confidence) — same path scheduler.py uses for emergency_alert."""
     body = _fetch_full_body(message, source) or message.get("body_preview", "")
+    uid = user_id or "default_user"
     raw_payload = {
         "source_platform": source,
         "message_id": message.get("message_id", ""),
@@ -203,13 +204,14 @@ def _ingest_one(message: dict[str, Any], source: str) -> dict[str, Any]:
         "subject": message.get("subject", ""),
         "from": message.get("from", ""),
         "received_at": message.get("received_at", ""),
+        "user_id": uid,
     }
     state = {"flow_type": "ingestion", "raw_payload": raw_payload}
-    config = {"configurable": {"thread_id": f"ingest_{source}_{message.get('message_id', '')}"}}
+    config = {"configurable": {"thread_id": f"ingest_{uid}_{source}_{message.get('message_id', '')}"}}
     return get_compiled_graph().invoke(state, config=config)
 
 
-def ingest_new_mail(source: str, *, days: int = DEFAULT_LOOKBACK_DAYS, unread_only: bool = True) -> dict[str, Any]:
+def ingest_new_mail(source: str, *, days: int = DEFAULT_LOOKBACK_DAYS, unread_only: bool = True, user_id: str | None = None) -> dict[str, Any]:
     """Fetch -> prefilter -> ingest for one provider. Returns counts, not
     raw state, so callers (the connection-trigger hooks, or a manual
     re-sync endpoint later) don't need to know studypulse's internals."""
@@ -225,7 +227,7 @@ def ingest_new_mail(source: str, *, days: int = DEFAULT_LOOKBACK_DAYS, unread_on
     errors = 0
     for message in survivors:
         try:
-            _ingest_one(message, source)
+            _ingest_one(message, source, user_id=user_id)
             ingested += 1
         except Exception:
             logger.exception("Failed to ingest %s message %s", source, message.get("message_id"))
