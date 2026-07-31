@@ -59,7 +59,7 @@ SOURCE TEXT:
 """
 
 NOT_FOUND_MESSAGE = {
-    "vi": "Không tìm thấy trong tài liệu chính thức",
+    "vi": "Hiện tại mình không thể tìm thấy yêu cầu này trong các nguồn mà bạn cung cấp.",
     "en": "Not found in official materials",
 }
 
